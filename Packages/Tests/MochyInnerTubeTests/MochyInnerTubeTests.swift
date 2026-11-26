@@ -162,7 +162,7 @@ final class MochyInnerTubeTests: XCTestCase {
         // When contentLength == nil, probe MUST check bytes=1150000-1150001 and REJECT HTTP 416!
         let rejected416 = await YTPlayerResolver.validateStreamURL(
             url: URL(string: "https://cdn.example.com/cutoff416")!,
-            client: .ios,
+            client: .iOS,
             contentLength: nil,
             cookie: nil,
             session: session
@@ -171,7 +171,7 @@ final class MochyInnerTubeTests: XCTestCase {
 
         let validPast1MiB = await YTPlayerResolver.validateStreamURL(
             url: URL(string: "https://cdn.example.com/ok")!,
-            client: .ios,
+            client: .iOS,
             contentLength: nil,
             cookie: nil,
             session: session
