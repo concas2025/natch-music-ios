@@ -319,8 +319,7 @@ public actor LocalAudioProxy {
         }
         let parts = requestLine.split(separator: " ")
         guard parts.count >= 2 else {
-            await Self.sendRaw(Data("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".utf8), on: connection)
-            connection.cancel()
+            await Self.sendRaw(Data("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".utf8), on: connection, isFinal: true)
             return
         }
 
@@ -328,8 +327,7 @@ public actor LocalAudioProxy {
         let path = String(parts[1])
         guard method == "GET" || method == "HEAD",
               path.hasPrefix("/stream/") else {
-            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection)
-            connection.cancel()
+            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection, isFinal: true)
             return
         }
 
@@ -338,8 +336,7 @@ public actor LocalAudioProxy {
         let token = filePart.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
 
         guard let diskSession = sessionsByToken[token] else {
-            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection)
-            connection.cancel()
+            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection, isFinal: true)
             return
         }
 
@@ -358,16 +355,13 @@ public actor LocalAudioProxy {
         let contentType = await diskSession.mimeType
 
         if method == "HEAD" {
-            let headResp = """
-            HTTP/1.1 200 OK\r
-            Content-Type: \(contentType)\r
-            Accept-Ranges: bytes\r
-            Content-Length: \(totalBytes)\r
-            Connection: close\r
-            \r
-            """
-            await Self.sendRaw(Data(headResp.utf8), on: connection)
-            connection.cancel()
+            let headResp =
+                "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: \(contentType)\r\n" +
+                "Accept-Ranges: bytes\r\n" +
+                "Content-Length: \(totalBytes)\r\n" +
+                "Connection: close\r\n\r\n"
+            await Self.sendRaw(Data(headResp.utf8), on: connection, isFinal: true)
             return
         }
 
@@ -377,14 +371,11 @@ public actor LocalAudioProxy {
             rangeEnd = parsed.end
             isPartial = true
         } else if rangeHeader != nil {
-            let err416 = """
-            HTTP/1.1 416 Range Not Satisfiable\r
-            Content-Range: bytes */\(totalBytes)\r
-            Connection: close\r
-            \r
-            """
-            await Self.sendRaw(Data(err416.utf8), on: connection)
-            connection.cancel()
+            let err416 =
+                "HTTP/1.1 416 Range Not Satisfiable\r\n" +
+                "Content-Range: bytes */\(totalBytes)\r\n" +
+                "Connection: close\r\n\r\n"
+            await Self.sendRaw(Data(err416.utf8), on: connection, isFinal: true)
             return
         } else {
             rangeStart = 0
@@ -397,8 +388,7 @@ public actor LocalAudioProxy {
         let firstOk = await diskSession.ensureChunk(index: firstChunkIdx)
         guard firstOk else {
             let err502 = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"
-            await Self.sendRaw(Data(err502.utf8), on: connection)
-            connection.cancel()
+            await Self.sendRaw(Data(err502.utf8), on: connection, isFinal: true)
             return
         }
 
@@ -436,14 +426,13 @@ public actor LocalAudioProxy {
                 return
             }
 
-            guard await Self.sendRaw(slice, on: connection) else {
+            let isLastSlice = (cursor + Int64(readLen) > rangeEnd)
+            guard await Self.sendRaw(slice, on: connection, isFinal: isLastSlice) else {
                 connection.forceCancel()
                 return
             }
             cursor += Int64(readLen)
         }
-
-        connection.cancel()
     }
 
     private static func parseByteRange(_ header: String, totalBytes: Int64) -> (start: Int64, end: Int64)? {
@@ -499,11 +488,16 @@ public actor LocalAudioProxy {
     }
 
     @discardableResult
-    private static func sendRaw(_ data: Data, on connection: NWConnection) async -> Bool {
+    private static func sendRaw(_ data: Data, on connection: NWConnection, isFinal: Bool = false) async -> Bool {
         await withCheckedContinuation { cont in
-            connection.send(content: data, completion: .contentProcessed { error in
-                cont.resume(returning: error == nil)
-            })
+            connection.send(
+                content: data,
+                contentContext: isFinal ? .finalMessage : .defaultMessage,
+                isComplete: isFinal,
+                completion: .contentProcessed { error in
+                    cont.resume(returning: error == nil)
+                }
+            )
         }
     }
 }
