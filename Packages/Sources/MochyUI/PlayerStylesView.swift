@@ -660,7 +660,8 @@ public struct ModuleSkinPlayerView: View {
                 let barHeight = max(CGFloat(4), CGFloat(bins[idx]) * CGFloat(44))
                 Capsule()
                     .fill(accent)
-                    .frame(maxWidth: .infinity, height: barHeight)
+                    .frame(height: barHeight)
+                    .frame(maxWidth: .infinity)
             }
         }
         .frame(height: height)
