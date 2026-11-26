@@ -174,28 +174,39 @@ public struct BedsidePlayerView: View {
 
     private func analogClock(hour: Int, minute: Int, second: Int, tint: Color) -> some View {
         Canvas { ctx, size in
-            let c = CGPoint(x: size.width / 2, y: size.height / 2)
+            let c = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
             let r = min(size.width, size.height) * 0.46
 
             // Bezel & 12 hour ticks
-            ctx.stroke(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)), with: .color(tint.opacity(0.30)), lineWidth: 2)
+            let bezelRect = CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)
+            ctx.stroke(Path(ellipseIn: bezelRect), with: .color(tint.opacity(0.30)), lineWidth: 2)
             for tick in 0..<12 {
-                let angle = Double(tick) * (.pi / 6) - .pi * 0.5
-                let inner = r - (tick % 3 == 0 ? 14 : 8)
+                let angle = Double(tick) * (Double.pi / 6.0) - Double.pi * 0.5
+                let cosA = CGFloat(cos(angle))
+                let sinA = CGFloat(sin(angle))
+                let isMajor = (tick % 3 == 0)
+                let inner: CGFloat = r - (isMajor ? 14.0 : 8.0)
+                let outer: CGFloat = r - 2.0
                 var p = Path()
-                p.move(to: CGPoint(x: c.x + cos(angle) * inner, y: c.y + sin(angle) * inner))
-                p.addLine(to: CGPoint(x: c.x + cos(angle) * (r - 2), y: c.y + sin(angle) * (r - 2)))
-                ctx.stroke(p, with: .color(tint.opacity(tick % 3 == 0 ? 0.85 : 0.4)), style: StrokeStyle(lineWidth: tick % 3 == 0 ? 2.5 : 1.2, lineCap: .round))
+                p.move(to: CGPoint(x: c.x + cosA * inner, y: c.y + sinA * inner))
+                p.addLine(to: CGPoint(x: c.x + cosA * outer, y: c.y + sinA * outer))
+                ctx.stroke(
+                    p,
+                    with: .color(tint.opacity(isMajor ? 0.85 : 0.40)),
+                    style: StrokeStyle(lineWidth: isMajor ? 2.5 : 1.2, lineCap: .round)
+                )
             }
 
-            let hrAngle = (Double(hour % 12) + Double(minute) / 60.0) * (.pi / 6) - .pi * 0.5
-            let minAngle = (Double(minute) + Double(second) / 60.0) * (.pi / 30) - .pi * 0.5
-            let secAngle = Double(second) * (.pi / 30) - .pi * 0.5
+            let hrAngle = (Double(hour % 12) + Double(minute) / 60.0) * (Double.pi / 6.0) - Double.pi * 0.5
+            let minAngle = (Double(minute) + Double(second) / 60.0) * (Double.pi / 30.0) - Double.pi * 0.5
+            let secAngle = Double(second) * (Double.pi / 30.0) - Double.pi * 0.5
 
             func drawHand(angle: Double, length: CGFloat, width: CGFloat, color: Color) {
+                let cosA = CGFloat(cos(angle))
+                let sinA = CGFloat(sin(angle))
                 var p = Path()
                 p.move(to: c)
-                p.addLine(to: CGPoint(x: c.x + cos(angle) * length, y: c.y + sin(angle) * length))
+                p.addLine(to: CGPoint(x: c.x + cosA * length, y: c.y + sinA * length))
                 ctx.stroke(p, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
             }
 

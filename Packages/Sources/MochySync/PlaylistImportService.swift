@@ -7,6 +7,12 @@ public struct ImportProgressUpdate: Sendable, Equatable {
     public let stage: String
     public let matchedCount: Int
     public let totalCount: Int
+
+    public init(stage: String, matchedCount: Int, totalCount: Int) {
+        self.stage = stage
+        self.matchedCount = matchedCount
+        self.totalCount = totalCount
+    }
 }
 
 public struct PlaylistImportResult: Sendable, Equatable {

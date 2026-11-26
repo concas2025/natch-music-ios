@@ -448,42 +448,7 @@ public struct PlaylistDetailView: View {
 
                 LazyVStack(spacing: 8) {
                     ForEach(Array(songs.enumerated()), id: \.offset) { idx, song in
-                        VStack(spacing: 6) {
-                            HStack(spacing: 12) {
-                                Button {
-                                    coordinator.playLocalSong(song, allSongs: songs, playlistId: playlist.id)
-                                } label: {
-                                    HStack(spacing: 12) {
-                                        ArtworkImageView(urlString: song.thumbnailUrl, cornerRadius: 8)
-                                            .frame(width: 46, height: 46)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(song.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                                            Text(song.albumName ?? "Track").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                        }
-                                        Spacer()
-                                    }
-                                }
-                                .buttonStyle(.plain)
-
-                                if idx + 1 < songs.count {
-                                    Button {
-                                        mixPair = (song, songs[idx + 1])
-                                        showMixSheet = true
-                                    } label: {
-                                        Image(systemName: "waveform.path.ecg")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(MochyTheme.defaultAccent)
-                                            .padding(8)
-                                            .background(MochyTheme.defaultAccent.opacity(0.16))
-                                            .clipShape(Circle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(coordinator.settings.playlistStyle == .cards ? 10 : 4)
-                            .background(coordinator.settings.playlistStyle == .cards ? MochyTheme.cardSurface : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
+                        playlistSongRow(idx: idx, song: song)
                     }
                 }
 
@@ -491,7 +456,7 @@ public struct PlaylistDetailView: View {
             }
             .padding(16)
         }
-        .background(.black.ignoresSafeArea())
+        .background(Color.black)
         .navigationTitle(playlist.name)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -528,6 +493,45 @@ public struct PlaylistDetailView: View {
                 )
             }
         }
+    }
+
+    @ViewBuilder
+    private func playlistSongRow(idx: Int, song: SongEntity) -> some View {
+        let isCards = coordinator.settings.playlistStyle == .cards
+        HStack(spacing: 12) {
+            Button {
+                coordinator.playLocalSong(song, allSongs: songs, playlistId: playlist.id)
+            } label: {
+                HStack(spacing: 12) {
+                    ArtworkImageView(urlString: song.thumbnailUrl, cornerRadius: 8)
+                        .frame(width: 46, height: 46)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(song.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                        Text(song.albumName ?? "Track").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+
+            if idx + 1 < songs.count {
+                Button {
+                    mixPair = (song, songs[idx + 1])
+                    showMixSheet = true
+                } label: {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.caption.bold())
+                        .foregroundStyle(MochyTheme.defaultAccent)
+                        .padding(8)
+                        .background(MochyTheme.defaultAccent.opacity(0.16))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(isCards ? 10 : 4)
+        .background(isCards ? MochyTheme.cardSurface : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
@@ -609,7 +613,7 @@ public struct AlbumDetailView: View {
             }
             .padding(16)
         }
-        .background(.black.ignoresSafeArea())
+        .background(Color.black)
         .navigationTitle(title)
     }
 }
@@ -652,7 +656,7 @@ public struct ArtistDetailView: View {
             }
             .padding(16)
         }
-        .background(.black.ignoresSafeArea())
+        .background(Color.black)
         .navigationTitle(artist.name)
     }
 }

@@ -149,6 +149,20 @@ public struct ModuleSkinManifest: Codable, Sendable, Equatable {
         public let height: Double?
         public let cornerRadius: Double?
         public let alignment: String?
+
+        public init(
+            id: String,
+            kind: String,
+            height: Double? = nil,
+            cornerRadius: Double? = nil,
+            alignment: String? = nil
+        ) {
+            self.id = id
+            self.kind = kind
+            self.height = height
+            self.cornerRadius = cornerRadius
+            self.alignment = alignment
+        }
     }
 
     public let id: String
@@ -158,6 +172,24 @@ public struct ModuleSkinManifest: Codable, Sendable, Equatable {
     public let accentHex: String?
     public let lookOverrides: [String: String]?
     public let blocks: [Block]
+
+    public init(
+        id: String,
+        name: String,
+        author: String? = nil,
+        backgroundHex: [String],
+        accentHex: String? = nil,
+        lookOverrides: [String: String]? = nil,
+        blocks: [Block]
+    ) {
+        self.id = id
+        self.name = name
+        self.author = author
+        self.backgroundHex = backgroundHex
+        self.accentHex = accentHex
+        self.lookOverrides = lookOverrides
+        self.blocks = blocks
+    }
 
     public var sanitizedLookOverrides: [LookSettingKey: String] {
         var filtered: [LookSettingKey: String] = [:]

@@ -129,7 +129,8 @@ public struct MochySeekbarView: View {
                 let step: CGFloat = 2.0
                 var x: CGFloat = 0
                 while x <= splitX {
-                    let y = midY + sin(Double(x) * 0.14 - phase) * amp
+                    let waveOffset = CGFloat(sin(Double(x) * 0.14 - phase)) * amp
+                    let y = midY + waveOffset
                     if x == 0 {
                         wavePath.move(to: CGPoint(x: x, y: y))
                     } else {
@@ -413,15 +414,18 @@ public struct CoverRingView: View {
             if showVisualizer && !spectrumBins.isEmpty {
                 let count = min(32, spectrumBins.count)
                 for i in 0..<count {
-                    let angle = (Double(i) / Double(count)) * (.pi * 2) - .pi * 0.5
-                    let mag = CGFloat(min(1, max(0, spectrumBins[i])))
-                    let barLen = 4 + mag * 26
-                    let r0 = radius + 4
-                    let r1 = r0 + barLen
+                    let angle = (Double(i) / Double(count)) * (Double.pi * 2.0) - Double.pi * 0.5
+                    let cosA = CGFloat(cos(angle))
+                    let sinA = CGFloat(sin(angle))
+                    let mag = CGFloat(min(Float(1.0), max(Float(0.0), spectrumBins[i])))
+                    let barLen: CGFloat = 4.0 + mag * 26.0
+                    let r0: CGFloat = radius + 4.0
+                    let r1: CGFloat = r0 + barLen
                     var p = Path()
-                    p.move(to: CGPoint(x: center.x + cos(angle) * r0, y: center.y + sin(angle) * r0))
-                    p.addLine(to: CGPoint(x: center.x + cos(angle) * r1, y: center.y + sin(angle) * r1))
-                    ctx.stroke(p, with: .color(accent.opacity(0.45 + Double(mag) * 0.55)), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    p.move(to: CGPoint(x: center.x + cosA * r0, y: center.y + sinA * r0))
+                    p.addLine(to: CGPoint(x: center.x + cosA * r1, y: center.y + sinA * r1))
+                    let opacityVal = 0.45 + Double(mag) * 0.55
+                    ctx.stroke(p, with: .color(accent.opacity(opacityVal)), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                 }
             }
         }
