@@ -319,7 +319,8 @@ public actor LocalAudioProxy {
         }
         let parts = requestLine.split(separator: " ")
         guard parts.count >= 2 else {
-            await Self.sendRaw(Data("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".utf8), on: connection, isFinal: true)
+            await Self.sendRaw(Data("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".utf8), on: connection)
+            await Self.finishConnection(connection)
             return
         }
 
@@ -327,7 +328,8 @@ public actor LocalAudioProxy {
         let path = String(parts[1])
         guard method == "GET" || method == "HEAD",
               path.hasPrefix("/stream/") else {
-            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection, isFinal: true)
+            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection)
+            await Self.finishConnection(connection)
             return
         }
 
@@ -336,7 +338,8 @@ public actor LocalAudioProxy {
         let token = filePart.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
 
         guard let diskSession = sessionsByToken[token] else {
-            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection, isFinal: true)
+            await Self.sendRaw(Data("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8), on: connection)
+            await Self.finishConnection(connection)
             return
         }
 
@@ -361,7 +364,8 @@ public actor LocalAudioProxy {
                 "Accept-Ranges: bytes\r\n" +
                 "Content-Length: \(totalBytes)\r\n" +
                 "Connection: close\r\n\r\n"
-            await Self.sendRaw(Data(headResp.utf8), on: connection, isFinal: true)
+            await Self.sendRaw(Data(headResp.utf8), on: connection)
+            await Self.finishConnection(connection)
             return
         }
 
@@ -375,7 +379,8 @@ public actor LocalAudioProxy {
                 "HTTP/1.1 416 Range Not Satisfiable\r\n" +
                 "Content-Range: bytes */\(totalBytes)\r\n" +
                 "Connection: close\r\n\r\n"
-            await Self.sendRaw(Data(err416.utf8), on: connection, isFinal: true)
+            await Self.sendRaw(Data(err416.utf8), on: connection)
+            await Self.finishConnection(connection)
             return
         } else {
             rangeStart = 0
@@ -388,7 +393,8 @@ public actor LocalAudioProxy {
         let firstOk = await diskSession.ensureChunk(index: firstChunkIdx)
         guard firstOk else {
             let err502 = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"
-            await Self.sendRaw(Data(err502.utf8), on: connection, isFinal: true)
+            await Self.sendRaw(Data(err502.utf8), on: connection)
+            await Self.finishConnection(connection)
             return
         }
 
@@ -426,13 +432,14 @@ public actor LocalAudioProxy {
                 return
             }
 
-            let isLastSlice = (cursor + Int64(readLen) > rangeEnd)
-            guard await Self.sendRaw(slice, on: connection, isFinal: isLastSlice) else {
+            guard await Self.sendRaw(slice, on: connection) else {
                 connection.forceCancel()
                 return
             }
             cursor += Int64(readLen)
         }
+
+        await Self.finishConnection(connection)
     }
 
     private static func parseByteRange(_ header: String, totalBytes: Int64) -> (start: Int64, end: Int64)? {
@@ -488,14 +495,28 @@ public actor LocalAudioProxy {
     }
 
     @discardableResult
-    private static func sendRaw(_ data: Data, on connection: NWConnection, isFinal: Bool = false) async -> Bool {
+    private static func sendRaw(_ data: Data, on connection: NWConnection) async -> Bool {
         await withCheckedContinuation { cont in
             connection.send(
                 content: data,
-                contentContext: isFinal ? .finalMessage : .defaultMessage,
-                isComplete: isFinal,
+                contentContext: .defaultMessage,
+                isComplete: true,
                 completion: .contentProcessed { error in
                     cont.resume(returning: error == nil)
+                }
+            )
+        }
+    }
+
+    private static func finishConnection(_ connection: NWConnection) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            connection.send(
+                content: nil,
+                contentContext: .finalMessage,
+                isComplete: true,
+                completion: .contentProcessed { _ in
+                    connection.cancel()
+                    cont.resume()
                 }
             )
         }

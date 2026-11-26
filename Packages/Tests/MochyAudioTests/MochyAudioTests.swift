@@ -199,10 +199,15 @@ final class MochyAudioTests: XCTestCase {
         XCTAssertEqual(localURL.host, "127.0.0.1")
         XCTAssertEqual(localURL.pathExtension, "mp3")
 
+        let clientCfg = URLSessionConfiguration.ephemeral
+        clientCfg.timeoutIntervalForRequest = 10
+        clientCfg.timeoutIntervalForResource = 15
+        let clientSession = URLSession(configuration: clientCfg)
+
         // HEAD check
         var headReq = URLRequest(url: localURL)
         headReq.httpMethod = "HEAD"
-        let (_, headResp) = try await URLSession.shared.data(for: headReq)
+        let (_, headResp) = try await clientSession.data(for: headReq)
         let headHTTP = try XCTUnwrap(headResp as? HTTPURLResponse)
         XCTAssertEqual(headHTTP.statusCode, 200)
         XCTAssertEqual(headHTTP.value(forHTTPHeaderField: "Content-Length"), "\(payload.count)")
@@ -210,7 +215,7 @@ final class MochyAudioTests: XCTestCase {
         // Range 206 check crossing 256 KB chunk boundary (forces chunk 0 + chunk 1 after 403 hot-swap)
         var getReq = URLRequest(url: localURL)
         getReq.setValue("bytes=260000-270000", forHTTPHeaderField: "Range")
-        let (rangeData, rangeResp) = try await URLSession.shared.data(for: getReq)
+        let (rangeData, rangeResp) = try await clientSession.data(for: getReq)
         let rangeHTTP = try XCTUnwrap(rangeResp as? HTTPURLResponse)
         XCTAssertEqual(rangeHTTP.statusCode, 206)
         XCTAssertEqual(rangeData, Data(payload[260_000...270_000]))
