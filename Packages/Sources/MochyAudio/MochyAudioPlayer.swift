@@ -178,6 +178,7 @@ public final class MochyAudioPlayer {
     private var primaryEndObserver: NSObjectProtocol?
     private var primaryFailObserver: NSObjectProtocol?
     private var primaryStatusObservation: NSKeyValueObservation?
+    private var primaryTimeControlObservation: NSKeyValueObservation?
 
     private var secondaryPlayer: AVPlayer?
     private var secondaryDSPContext = RealtimeDeckDSPContext(enableStageAndSpectrum: true)
@@ -506,9 +507,18 @@ public final class MochyAudioPlayer {
                 if resolved.isDRM && resolved.url.scheme == "musickit" {
                     try await playMusicKitDRM(url: resolved.url, resumeAt: resumeAtSeconds, generation: gen)
                 } else {
-                    let assetURL = try await prepareAssetURL(for: item, resolved: resolved)
+                    let assetURL: URL
+                    let assetHeaders: [String: String]
+                    if let proxiedURL = try? await prepareAssetURL(for: item, resolved: resolved) {
+                        assetURL = proxiedURL
+                        assetHeaders = [:]
+                    } else {
+                        // Graceful direct fallback if proxy probe/bind fails.
+                        assetURL = resolved.url
+                        assetHeaders = resolved.headers
+                    }
                     guard gen == self.loadGeneration else { return }
-                    try await startPrimaryDeck(assetURL: assetURL, resumeAt: resumeAtSeconds, generation: gen)
+                    try await startPrimaryDeck(assetURL: assetURL, headers: assetHeaders, resumeAt: resumeAtSeconds, generation: gen)
                 }
 
                 self.isBuffering = false
@@ -596,10 +606,34 @@ public final class MochyAudioPlayer {
         }
     }
 
-    private func startPrimaryDeck(assetURL: URL, resumeAt: TimeInterval, generation: UInt64) async throws {
-        let asset = AVURLAsset(url: assetURL)
+    private func startPrimaryDeck(
+        assetURL: URL,
+        headers: [String: String] = [:],
+        resumeAt: TimeInterval,
+        generation: UInt64
+    ) async throws {
+        let asset: AVURLAsset
+        if assetURL.isFileURL || assetURL.host == "127.0.0.1" || headers.isEmpty {
+            asset = AVURLAsset(url: assetURL)
+        } else {
+            asset = AVURLAsset(url: assetURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        }
         let playerItem = AVPlayerItem(asset: asset)
-        if let mix = await AudioProcessingTapBinder.makeAudioMix(for: asset, context: primaryDSPContext) {
+
+        let dspContext = primaryDSPContext
+        let audioMix = await withTaskGroup(of: AVMutableAudioMix?.self) { group -> AVMutableAudioMix? in
+            group.addTask {
+                await AudioProcessingTapBinder.makeAudioMix(for: asset, context: dspContext)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        if let mix = audioMix {
             playerItem.audioMix = mix
         }
 
@@ -651,6 +685,14 @@ public final class MochyAudioPlayer {
             }
         }
 
+        primaryTimeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
+            let status = p.timeControlStatus
+            Task { @MainActor in
+                guard let self, self.loadGeneration == generation else { return }
+                self.isBuffering = self.isPlaying && (status == .waitingToPlayAtSpecifiedRate)
+            }
+        }
+
         primaryTimeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
@@ -679,7 +721,7 @@ public final class MochyAudioPlayer {
 
     private func handlePlaybackMilestones(elapsed: TimeInterval) {
         guard let item = currentItem else { return }
-        if elapsed >= 25 && !playRecordedForGeneration {
+        if elapsed >= 10 && !playRecordedForGeneration {
             playRecordedForGeneration = true
             try? database.recordPlayEvent(songId: item.id, playTimeMs: Int64(elapsed * 1000))
         }
@@ -985,6 +1027,8 @@ public final class MochyAudioPlayer {
         }
         primaryStatusObservation?.invalidate()
         primaryStatusObservation = nil
+        primaryTimeControlObservation?.invalidate()
+        primaryTimeControlObservation = nil
     }
 
     private func stopAllDecks() {
@@ -1154,7 +1198,8 @@ public final class MochyAudioPlayer {
         guard cachedArtworkSongId != item.id else { return }
         cachedArtworkSongId = item.id
         cachedArtworkData = nil
-        guard let urlStr = item.thumbnailURL, let url = URL(string: urlStr) else { return }
+        guard let urlStr = ThumbnailURLUpgrader.upgrade(item.thumbnailURL, size: 720),
+              let url = URL(string: urlStr) else { return }
         let targetId = item.id
         Task {
             guard let (data, _) = try? await URLSession.shared.data(from: url),

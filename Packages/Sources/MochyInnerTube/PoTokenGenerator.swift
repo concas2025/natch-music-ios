@@ -56,8 +56,8 @@ public actor PoTokenGenerator {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 10
-            cfg.timeoutIntervalForResource = 15
+            cfg.timeoutIntervalForRequest = 5
+            cfg.timeoutIntervalForResource = 7
             self.session = URLSession(configuration: cfg)
         }
     }
@@ -88,7 +88,7 @@ public actor PoTokenGenerator {
 
         #if canImport(WebKit) && os(iOS)
         do {
-            let result = try await withTimeout(seconds: 14) {
+            let result = try await withTimeout(seconds: 6) {
                 try await self.mintPoTokenPair(videoId: videoId, sessionId: sessionId)
             }
             scheduleIdleClose()

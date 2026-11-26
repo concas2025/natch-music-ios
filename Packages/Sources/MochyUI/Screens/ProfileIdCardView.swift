@@ -165,7 +165,7 @@ public struct ProfileIdCardFront: View {
                 Circle()
                     .fill(
                         LinearGradient(
-                            colors: [MochyTheme.defaultAccent, .indigo],
+                            colors: [Color(white: 0.24), Color(white: 0.12)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -498,7 +498,7 @@ public struct ProfileAndRecapScreen: View {
                                 .font(.caption.bold())
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(MochyTheme.defaultAccent)
+                        .tint(MochyTheme.buttonFill)
 
                         Button {
                             cardFinish = (cardFinish == .dark) ? .silver : .dark
@@ -537,7 +537,7 @@ public struct ProfileAndRecapScreen: View {
                         }
                         .padding(16)
                         .background(
-                            LinearGradient(colors: [MochyTheme.defaultAccent.opacity(0.28), MochyTheme.cardSurface], startPoint: .leading, endPoint: .trailing)
+                            LinearGradient(colors: [Color(white: 0.14), MochyTheme.cardSurface], startPoint: .leading, endPoint: .trailing)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }

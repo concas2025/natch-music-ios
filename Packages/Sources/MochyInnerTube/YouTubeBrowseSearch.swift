@@ -1,4 +1,5 @@
 import Foundation
+import MochyCore
 
 // MARK: - High-level YouTube Music Catalog Models
 
@@ -236,7 +237,7 @@ extension YTPlayerResolver {
             for fmt in streamingData.formats ?? [] {
                 guard let height = fmt.height, let width = fmt.width,
                       fmt.mimeType.lowercased().contains("mp4"),
-                      let resolvedStr = try? await resolveFormatURL(format: fmt),
+                      let resolvedStr = try? await resolveFormatURL(format: fmt, client: client),
                       let url = URL(string: resolvedStr) else {
                     continue
                 }
@@ -257,7 +258,7 @@ extension YTPlayerResolver {
             for fmt in streamingData.adaptiveFormats {
                 guard let height = fmt.height, let width = fmt.width,
                       fmt.mimeType.lowercased().contains("video/mp4"),
-                      let resolvedStr = try? await resolveFormatURL(format: fmt),
+                      let resolvedStr = try? await resolveFormatURL(format: fmt, client: client),
                       let url = URL(string: resolvedStr) else {
                     continue
                 }
@@ -306,7 +307,8 @@ public enum InnerTubeParser {
                 subtitle = (header["subtitle"] as? [String: Any]).flatMap { runsText($0) }
             }
             if thumb == nil {
-                thumb = ((((header["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+                let rawThumb = ((((header["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+                thumb = ThumbnailURLUpgrader.upgrade(rawThumb)
             }
         }
         return (title, subtitle, thumb)
@@ -326,7 +328,8 @@ public enum InnerTubeParser {
             guard seen.insert(browseId).inserted else { return }
             let title = (twoRow["title"] as? [String: Any]).flatMap { runsText($0) } ?? "Playlist"
             let sub = (twoRow["subtitle"] as? [String: Any]).flatMap { runsText($0) }
-            let thumb = ((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            let rawThumb = ((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            let thumb = ThumbnailURLUpgrader.upgrade(rawThumb)
             out.append(YTPlaylistSummary(id: browseId, title: title, thumbnailURL: thumb, trackCountText: sub))
         }
         return out
@@ -380,7 +383,7 @@ public enum InnerTubeParser {
             let artistText = (panel["shortBylineText"] as? [String: Any]).flatMap { runsText($0) } ?? ""
             let artists = splitArtists(artistText)
             let lengthStr = (panel["lengthText"] as? [String: Any]).flatMap { runsText($0) }
-            let thumbs = (((panel["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String)
+            let thumbs = ThumbnailURLUpgrader.upgrade((((panel["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String))
             return YTTrackItem(
                 id: videoId,
                 title: title,
@@ -408,7 +411,7 @@ public enum InnerTubeParser {
                               let txt = first["text"] as? [String: Any] else { return nil }
                         return parseDurationSeconds(runsText(txt))
                     }
-            let thumbs = ((((responsive["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            let thumbs = ThumbnailURLUpgrader.upgrade(((((responsive["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String)
             return YTTrackItem(
                 id: videoId,
                 title: title,
@@ -423,7 +426,7 @@ public enum InnerTubeParser {
            let videoId = watch["videoId"] as? String {
             let title = (twoRow["title"] as? [String: Any]).flatMap { runsText($0) } ?? "Unknown"
             let subtitle = (twoRow["subtitle"] as? [String: Any]).flatMap { runsText($0) } ?? ""
-            let thumbs = ((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            let thumbs = ThumbnailURLUpgrader.upgrade(((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String)
             return YTTrackItem(
                 id: videoId,
                 title: title,

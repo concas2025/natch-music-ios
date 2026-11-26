@@ -120,7 +120,7 @@ public struct MochySettingsScreen: View {
                                 } else {
                                     Button("Sign In") { showYTLoginSheet = true }
                                         .buttonStyle(.borderedProminent)
-                                        .tint(MochyTheme.defaultAccent)
+                                        .tint(MochyTheme.buttonFill)
                                         .controlSize(.small)
                                 }
                             }
@@ -161,7 +161,7 @@ public struct MochySettingsScreen: View {
                                     Task { await coordinator.runPlaylistImport(urlString: importURLInput) }
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .tint(MochyTheme.defaultAccent)
+                                .tint(MochyTheme.buttonFill)
                                 .disabled(importURLInput.trimmingCharacters(in: .whitespaces).isEmpty || coordinator.isImportingPlaylist)
                             }
 
@@ -234,7 +234,7 @@ public struct MochySettingsScreen: View {
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
-                            .tint(MochyTheme.defaultAccent)
+                            .tint(MochyTheme.buttonFill)
                         }
                     }
 
@@ -429,7 +429,7 @@ public struct MochySettingsScreen: View {
                                     }
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .tint(MochyTheme.defaultAccent)
+                                .tint(MochyTheme.buttonFill)
 
                                 Button("Import Archive") {
                                     showBackupImporter = true
@@ -566,7 +566,7 @@ public struct MochySettingsScreen: View {
                         .clipShape(Circle())
                 } else {
                     Circle()
-                        .fill(LinearGradient(colors: [MochyTheme.defaultAccent, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .fill(LinearGradient(colors: [Color(white: 0.24), Color(white: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing))
                         .frame(width: 48, height: 48)
                         .overlay(Image(systemName: "person.fill").foregroundStyle(.white))
                 }

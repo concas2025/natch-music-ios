@@ -61,17 +61,19 @@ public struct MochySeekbarView: View {
                             .fill(accent)
                             .frame(width: width * displayProgress, height: 3)
                     case .default:
+                        let thumbDiameter: CGFloat = scrubbingProgress != nil ? 14 : 9
+                        let trackHeight: CGFloat = scrubbingProgress != nil ? 6 : 4
                         Capsule()
-                            .fill(.white.opacity(0.24))
-                            .frame(height: 6)
+                            .fill(.white.opacity(0.22))
+                            .frame(height: trackHeight)
                         Capsule()
                             .fill(accent)
-                            .frame(width: width * displayProgress, height: 6)
+                            .frame(width: max(4, width * displayProgress), height: trackHeight)
                         Circle()
                             .fill(.white)
-                            .frame(width: scrubbingProgress != nil ? 16 : 12, height: scrubbingProgress != nil ? 16 : 12)
-                            .shadow(color: .black.opacity(0.35), radius: 3)
-                            .offset(x: max(0, min(width - 12, width * displayProgress - 6)))
+                            .frame(width: thumbDiameter, height: thumbDiameter)
+                            .shadow(color: .black.opacity(0.35), radius: 2.5)
+                            .offset(x: max(0, min(width - thumbDiameter, width * displayProgress - thumbDiameter * 0.5)))
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -237,8 +239,10 @@ public struct TransportControlsRow: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(active ? (coordinator.paletteColors.first ?? MochyTheme.defaultAccent) : .white.opacity(0.75))
+                .foregroundStyle(active ? .white : .white.opacity(0.68))
                 .frame(width: 36, height: 36)
+                .background(active ? Color.white.opacity(0.14) : Color.clear)
+                .clipShape(Circle())
         }
         .buttonStyle(.plain)
     }
@@ -285,7 +289,7 @@ public struct LikeBurstButton: View {
                 ForEach(0..<8, id: \.self) { idx in
                     let angle = Double(idx) * (.pi / 4.0)
                     Circle()
-                        .fill(MochyTheme.defaultAccent)
+                        .fill(Color.white.opacity(0.9))
                         .frame(width: 4, height: 4)
                         .offset(
                             x: CGFloat(cos(angle)) * 16 * burstScale,
@@ -296,7 +300,7 @@ public struct LikeBurstButton: View {
 
                 Image(systemName: liked ? "heart.fill" : "heart")
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(liked ? MochyTheme.defaultAccent : .white.opacity(0.85))
+                    .foregroundStyle(liked ? .white : .white.opacity(0.75))
                     .scaleEffect(liked ? 1.08 : 1.0)
                     .animation(.spring(response: 0.28, dampingFraction: 0.55), value: liked)
             }
@@ -449,8 +453,8 @@ public struct RidingTimesLayout<HeaderContent: View>: View {
         let duration = max(coordinator.player.duration, 1.0)
         let livePct = min(1.0, max(0.0, coordinator.player.currentTime / duration))
         let pct = dragProgress ?? livePct
-        let accent = coordinator.paletteColors.first ?? MochyTheme.defaultAccent
-        let c1 = coordinator.paletteColors.indices.contains(1) ? coordinator.paletteColors[1] : .indigo
+        let accent = coordinator.paletteColors.first ?? Color(white: 0.26)
+        let c1 = coordinator.paletteColors.indices.contains(1) ? coordinator.paletteColors[1] : Color(white: 0.15)
 
         GeometryReader { geo in
             let w = geo.size.width

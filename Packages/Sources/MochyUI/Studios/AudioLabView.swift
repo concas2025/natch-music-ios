@@ -104,7 +104,7 @@ public struct AudioLabView: View {
             HStack(alignment: .bottom, spacing: 3) {
                 ForEach(Array(coordinator.player.spectrumBins.enumerated()), id: \.offset) { _, bin in
                     Capsule()
-                        .fill(LinearGradient(colors: [accent, .cyan], startPoint: .bottom, endPoint: .top))
+                        .fill(LinearGradient(colors: [accent, Color.white.opacity(0.85)], startPoint: .bottom, endPoint: .top))
                         .frame(maxWidth: .infinity)
                         .frame(height: max(4, CGFloat(min(1, max(0, bin))) * 76))
                 }
@@ -442,6 +442,7 @@ public struct AudioLabView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(MochyTheme.buttonFill)
                 Spacer()
             }
             .padding(16)

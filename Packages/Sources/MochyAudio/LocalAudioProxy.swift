@@ -111,8 +111,8 @@ public actor LocalAudioProxy {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 12
-            cfg.timeoutIntervalForResource = 60
+            cfg.timeoutIntervalForRequest = 8
+            cfg.timeoutIntervalForResource = 45
             cfg.httpMaximumConnectionsPerHost = 6
             self.session = URLSession(configuration: cfg)
         }
@@ -157,10 +157,24 @@ public actor LocalAudioProxy {
             newListener.start(queue: networkQueue)
         }
 
-        newListener.stateUpdateHandler = nil
+        newListener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                Task { await self?.handleListenerInvalidated(newListener) }
+            default:
+                break
+            }
+        }
         self.listener = newListener
         self.boundPort = port
         return port
+    }
+
+    private func handleListenerInvalidated(_ failed: NWListener) {
+        if self.listener === failed {
+            self.listener = nil
+            self.boundPort = nil
+        }
     }
 
     public func stop() async {
@@ -510,13 +524,34 @@ public actor LocalAudioProxy {
 
     private static func finishConnection(_ connection: NWConnection) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let lock = NSLock()
+            var finished = false
+            func closeOnce() {
+                lock.lock()
+                let shouldClose = !finished
+                finished = true
+                lock.unlock()
+                guard shouldClose else { return }
+                connection.cancel()
+                cont.resume()
+            }
+
             connection.send(
                 content: nil,
                 contentContext: .finalMessage,
                 isComplete: true,
-                completion: .contentProcessed { _ in
-                    connection.cancel()
-                    cont.resume()
+                completion: .contentProcessed { error in
+                    if error != nil {
+                        closeOnce()
+                        return
+                    }
+                    // Wait for peer EOF or short grace window so loopback kernel buffer drains without TCP RST.
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, _, _ in
+                        closeOnce()
+                    }
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+                        closeOnce()
+                    }
                 }
             )
         }

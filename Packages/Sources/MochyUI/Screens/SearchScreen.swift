@@ -69,7 +69,7 @@ public struct SearchScreen: View {
                     } label: {
                         Image(systemName: coordinator.shazam.isListening ? "waveform.circle.fill" : "shazam.logo.fill")
                             .font(.title3)
-                            .foregroundStyle(coordinator.shazam.isListening ? MochyTheme.defaultAccent : .cyan)
+                            .foregroundStyle(coordinator.shazam.isListening ? .white : .white.opacity(0.75))
                     }
                 }
                 .padding(.horizontal, 14)
@@ -278,7 +278,7 @@ public struct SearchScreen: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(MochyTheme.defaultAccent)
+                .tint(MochyTheme.buttonFill)
             }
 
             if let msg = coordinator.importStatusMessage {
@@ -290,14 +290,14 @@ public struct SearchScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(MochyTheme.defaultAccent.opacity(0.45), lineWidth: 1)
+                .strokeBorder(MochyTheme.subtleBorder, lineWidth: 1)
         )
     }
 
     private var shazamCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Image(systemName: "shazam.logo.fill").foregroundStyle(.cyan)
+                Image(systemName: "shazam.logo.fill").foregroundStyle(.white.opacity(0.85))
                 Text(coordinator.shazam.statusMessage)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)
@@ -320,7 +320,7 @@ public struct SearchScreen: View {
                         Task { await coordinator.playShazamMatch(match) }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.cyan)
+                    .tint(MochyTheme.buttonFill)
                     .controlSize(.small)
                 }
             }

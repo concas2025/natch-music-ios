@@ -46,6 +46,10 @@ public struct YouTubeClient: Sendable, Equatable {
         platform != nil
     }
 
+    public var isNativeStreamClient: Bool {
+        ["IOS", "VISIONOS", "ANDROID", "ANDROID_VR", "ANDROID_CREATOR"].contains(clientName)
+    }
+
     public init(
         clientName: String,
         clientVersion: String,
@@ -377,16 +381,17 @@ public struct YouTubeClient: Sendable, Equatable {
     ]
 
     public static let streamFallbackClients: [YouTubeClient] = [
-        visionOS,
-        webRemix,
-        web,
-        webCreator,
+        iOS,
         iPadOS,
         androidVR14332,
         androidVR16148,
         androidVR16510,
         androidVRNoAuth,
+        visionOS,
         tvHTML5SimplyEmbeddedPlayer,
+        webRemix,
+        web,
+        webCreator,
         tvHTML5,
         androidCreator,
         mobile,

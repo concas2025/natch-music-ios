@@ -93,8 +93,8 @@ public actor MonochromeModule: MochyStreamModule {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 8
-            cfg.timeoutIntervalForResource = 12
+            cfg.timeoutIntervalForRequest = 3.5
+            cfg.timeoutIntervalForResource = 5.0
             self.session = URLSession(configuration: cfg)
         }
     }
@@ -187,7 +187,7 @@ public actor MonochromeModule: MochyStreamModule {
         guard let url = URL(string: urlString), ModuleUrlGuard.isAllowedPublicURL(url) else { return nil }
 
         var req = URLRequest(url: url)
-        req.timeoutInterval = 8
+        req.timeoutInterval = 3.5
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if server.kind == .relay {

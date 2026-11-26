@@ -14,7 +14,6 @@ public struct FlagshipPlayerView: View {
 
     public var body: some View {
         let item = coordinator.player.currentItem
-        let accent = coordinator.paletteColors.first ?? MochyTheme.defaultAccent
 
         GeometryReader { geo in
             ZStack {
@@ -56,8 +55,31 @@ public struct FlagshipPlayerView: View {
                     .padding(.horizontal, 24)
                     .padding(.top, CGFloat(coordinator.settings.playerControlsShift) * 0.3)
 
-                    MochySeekbarView(coordinator: coordinator, accentColor: accent)
+                    MochySeekbarView(coordinator: coordinator, accentColor: .white.opacity(0.92))
                         .padding(.horizontal, 24)
+
+                    if let err = coordinator.player.lastError, !err.isEmpty {
+                        HStack(spacing: 8) {
+                            Text(err)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(1)
+                            Button("Retry") {
+                                coordinator.player.jumpToQueueIndex(coordinator.player.currentIndex)
+                            }
+                            .font(.caption2.bold())
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(.white)
+                            .clipShape(Capsule())
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(Capsule())
+                        .padding(.horizontal, 24)
+                    }
 
                     TransportControlsRow(coordinator: coordinator, onOpenQueue: onOpenQueue)
                         .padding(.vertical, 6)
@@ -275,8 +297,8 @@ public struct FlagshipPlayerView: View {
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(selected ? MochyTheme.defaultAccent : Color.white.opacity(0.14))
-            .foregroundStyle(.white)
+            .background(selected ? Color.white : Color.white.opacity(0.14))
+            .foregroundStyle(selected ? .black : .white)
             .clipShape(Capsule())
     }
 }

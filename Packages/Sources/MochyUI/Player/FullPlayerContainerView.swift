@@ -139,7 +139,7 @@ public struct FullPlayerContainerView: View {
             } label: {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(coordinator.player.isCrossmixing ? Color.cyan : (coordinator.settings.audioPassEnabled ? Color.green : MochyTheme.defaultAccent))
+                        .fill(coordinator.settings.audioPassEnabled ? Color.green : Color.white.opacity(0.72))
                         .frame(width: 6, height: 6)
                     Text(coordinator.player.activeQualityBadge.isEmpty ? coordinator.settings.playerStyle.displayName : coordinator.player.activeQualityBadge)
                         .font(.caption2.weight(.semibold))
@@ -259,11 +259,11 @@ public struct PlayerSelectorSheet: View {
                             }
                             .padding(14)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(selected ? MochyTheme.defaultAccent.opacity(0.18) : MochyTheme.cardSurface)
+                            .background(selected ? Color.white.opacity(0.14) : MochyTheme.cardSurface)
                             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .strokeBorder(selected ? MochyTheme.defaultAccent : MochyTheme.subtleBorder, lineWidth: selected ? 1.5 : 1)
+                                    .strokeBorder(selected ? Color.white.opacity(0.55) : MochyTheme.subtleBorder, lineWidth: selected ? 1.5 : 1)
                             )
                         }
                         .buttonStyle(.plain)
@@ -297,7 +297,7 @@ public struct PlayerSelectorSheet: View {
 
     private func subtitle(for style: PlayerStyle) -> String {
         switch style {
-        case .flagship: return "Ambient shader, WYSIWYG Studio & wavy bar"
+        case .flagship: return "Ambient backdrop, clean bar & WYSIWYG Studio"
         case .turntable: return "Spinning vinyl grooves & draggable S-tonearm"
         case .video: return "Synchronized music video up to 4K"
         case .ipod: return "4 iconic chassis, Click Wheel & Cover Flow 3D"

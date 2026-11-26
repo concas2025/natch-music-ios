@@ -8,13 +8,15 @@ import UIKit
 #endif
 
 public enum MochyTheme {
-    public static let defaultAccent = Color(red: 0.91, green: 0.27, blue: 0.44)
-    public static let cardSurface = Color(white: 0.08)
+    public static let defaultAccent = Color(white: 0.92)
+    public static let cardSurface = Color(white: 0.085)
     public static let elevatedSurface = Color(white: 0.14)
-    public static let subtleBorder = Color.white.opacity(0.10)
+    public static let chipActiveSurface = Color(white: 0.25)
+    public static let buttonFill = Color(white: 0.22)
+    public static let subtleBorder = Color.white.opacity(0.09)
 
     public static func background(pureBlack: Bool) -> Color {
-        pureBlack ? .black : Color(red: 0.05, green: 0.05, blue: 0.07)
+        pureBlack ? .black : Color(white: 0.05)
     }
 
     public static func colorFromHex(_ hex: String?) -> Color? {
@@ -33,7 +35,7 @@ public enum ArtworkPaletteExtractor {
     public static func extractColors(fromImageData data: Data) -> [Color] {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            return [MochyTheme.defaultAccent, .indigo, .purple, .black]
+            return [Color(white: 0.30), Color(white: 0.18), Color(white: 0.10), .black]
         }
 
         let size = 24
@@ -48,7 +50,7 @@ public enum ArtworkPaletteExtractor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            return [MochyTheme.defaultAccent, .indigo, .purple, .black]
+            return [Color(white: 0.30), Color(white: 0.18), Color(white: 0.10), .black]
         }
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: size, height: size))
 
@@ -66,7 +68,7 @@ public enum ArtworkPaletteExtractor {
         }
 
         let top = buckets.sorted { $0.score > $1.score }
-        guard !top.isEmpty else { return [MochyTheme.defaultAccent, .indigo, .purple, .black] }
+        guard !top.isEmpty else { return [Color(white: 0.30), Color(white: 0.18), Color(white: 0.10), .black] }
         let strideStep = max(1, top.count / 4)
         return (0..<4).map { i in
             let p = top[min(i * strideStep, top.count - 1)]
@@ -91,10 +93,10 @@ public struct AmbientBackdropView: View {
     }
 
     public var body: some View {
-        let c0 = colors.indices.contains(0) ? colors[0] : MochyTheme.defaultAccent
-        let c1 = colors.indices.contains(1) ? colors[1] : .indigo
-        let c2 = colors.indices.contains(2) ? colors[2] : .purple
-        let c3 = colors.indices.contains(3) ? colors[3] : .teal
+        let c0 = colors.indices.contains(0) ? colors[0] : Color(white: 0.28)
+        let c1 = colors.indices.contains(1) ? colors[1] : Color(white: 0.18)
+        let c2 = colors.indices.contains(2) ? colors[2] : Color(white: 0.10)
+        let c3 = colors.indices.contains(3) ? colors[3] : Color(white: 0.05)
 
         Group {
             switch style {
@@ -162,18 +164,57 @@ public struct AmbientBackdropView: View {
     }
 }
 
-public struct ArtworkImageView: View {
-    public let urlString: String?
-    public let cornerRadius: Double
-
-    public init(urlString: String?, cornerRadius: Double = 14) {
-        self.urlString = urlString
-        self.cornerRadius = cornerRadius
-    }
+public struct NatchLogoImage: View {
+    public init() {}
 
     public var body: some View {
         Group {
-            if let urlString, let url = URL(string: urlString) {
+            #if os(iOS) && canImport(UIKit)
+            if let path = Bundle.module.path(forResource: "NatchLogo", ofType: "png"),
+               let uiImage = UIImage(contentsOfFile: path) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image("NatchLogo", bundle: .main)
+                    .resizable()
+                    .scaledToFit()
+            }
+            #elseif canImport(AppKit)
+            if let url = Bundle.module.url(forResource: "NatchLogo", withExtension: "png"),
+               let nsImage = NSImage(contentsOf: url) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image("NatchLogo", bundle: .main)
+                    .resizable()
+                    .scaledToFit()
+            }
+            #else
+            Image("NatchLogo", bundle: .main)
+                .resizable()
+                .scaledToFit()
+            #endif
+        }
+    }
+}
+
+public struct ArtworkImageView: View {
+    public let urlString: String?
+    public let cornerRadius: Double
+    public let targetSize: Int
+
+    public init(urlString: String?, cornerRadius: Double = 14, targetSize: Int = 720) {
+        self.urlString = urlString
+        self.cornerRadius = cornerRadius
+        self.targetSize = targetSize
+    }
+
+    public var body: some View {
+        let resolvedURL = ThumbnailURLUpgrader.upgrade(urlString, size: targetSize)
+        Group {
+            if let resolvedURL, let url = URL(string: resolvedURL) {
                 if url.isFileURL {
                     localFileImage(url: url)
                 } else {

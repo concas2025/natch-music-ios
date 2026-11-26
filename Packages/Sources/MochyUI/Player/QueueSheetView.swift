@@ -162,8 +162,8 @@ public struct QueueSheetView: View {
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(active ? MochyTheme.defaultAccent : MochyTheme.cardSurface)
-                .foregroundStyle(.white)
+                .background(active ? Color.white : MochyTheme.cardSurface)
+                .foregroundStyle(active ? .black : .white)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)

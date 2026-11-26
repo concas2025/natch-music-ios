@@ -101,4 +101,49 @@ final class MochyCoreTests: XCTestCase {
         // Stop symbol (2331112) ends with two dark bars
         XCTAssertEqual(Array(modules.suffix(2)), [true, true])
     }
+
+    func testThumbnailURLUpgraderUpgradesGoogleAndYtimgURLs() {
+        XCTAssertEqual(
+            ThumbnailURLUpgrader.upgrade("https://lh3.googleusercontent.com/abc=w120-h120-l90-rj"),
+            "https://lh3.googleusercontent.com/abc=w720-h720-l90-rj"
+        )
+        XCTAssertEqual(
+            ThumbnailURLUpgrader.upgrade("https://yt3.ggpht.com/avatar=s60-c-k-c0x00ffffff-no-rj", size: 720),
+            "https://yt3.ggpht.com/avatar=s720-c-k-c0x00ffffff-no-rj"
+        )
+        XCTAssertEqual(
+            ThumbnailURLUpgrader.upgrade("https://i.ytimg.com/vi/abc123/mqdefault.jpg"),
+            "https://i.ytimg.com/vi/abc123/hqdefault.jpg"
+        )
+        XCTAssertEqual(
+            ThumbnailURLUpgrader.upgrade("file:///var/mobile/cover.jpg"),
+            "file:///var/mobile/cover.jpg"
+        )
+        XCTAssertEqual(
+            ThumbnailURLUpgrader.upgrade("https://example.com/art.png"),
+            "https://example.com/art.png"
+        )
+    }
+
+    @MainActor
+    func testAppSettingsDefaultsAndV2Migration() {
+        let freshSuite = "mochy.test.fresh.\(UUID().uuidString)"
+        let freshDefaults = UserDefaults(suiteName: freshSuite)!
+        defer { freshDefaults.removePersistentDomain(forName: freshSuite) }
+
+        let fresh = AppSettings(defaults: freshDefaults)
+        XCTAssertEqual(fresh.seekbarStyle, .default)
+        XCTAssertEqual(fresh.sourceOrder, ["youtube", "monochrome", "jiosaavn"])
+
+        let legacySuite = "mochy.test.legacy.\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacySuite)!
+        defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
+
+        legacyDefaults.set(SeekbarStyle.wavy.rawValue, forKey: PreferenceKeys.seekbarStyle)
+        legacyDefaults.set(["monochrome", "jiosaavn", "youtube"], forKey: PreferenceKeys.sourceOrder)
+
+        let migrated = AppSettings(defaults: legacyDefaults)
+        XCTAssertEqual(migrated.seekbarStyle, .default)
+        XCTAssertEqual(migrated.sourceOrder, ["youtube", "monochrome", "jiosaavn"])
+    }
 }

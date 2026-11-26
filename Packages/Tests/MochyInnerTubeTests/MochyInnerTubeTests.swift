@@ -184,11 +184,54 @@ final class MochyInnerTubeTests: XCTestCase {
     }
 
     func testStreamHeadersAndWebCreatorOrigin() {
+        XCTAssertEqual(YouTubeClient.streamFallbackClients.first, .iOS)
+        let webRemixIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .webRemix) ?? -1
+        let iPadIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .iPadOS) ?? 99
+        XCTAssertLessThan(iPadIdx, webRemixIdx)
+
+        let iosHeaders = YTPlayerResolver.streamHeaders(for: .iOS, cookie: nil)
+        XCTAssertNil(iosHeaders["Origin"])
+        XCTAssertNil(iosHeaders["Referer"])
+
         XCTAssertEqual(YouTubeClient.webCreator.apiOrigin, "https://studio.youtube.com")
         let creatorHeaders = YTPlayerResolver.streamHeaders(for: .webCreator, cookie: "SAPISID=x")
         XCTAssertEqual(creatorHeaders["Origin"], "https://studio.youtube.com")
         XCTAssertEqual(creatorHeaders["Referer"], "https://studio.youtube.com/")
         XCTAssertEqual(creatorHeaders["Cookie"], "SAPISID=x")
+    }
+
+    func testValidateStreamURLHandlesTiny416VsCutoff416() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        MockURLProtocol.handler = { request in
+            let urlStr = request.url?.absoluteString ?? ""
+            if urlStr.contains("tiny") {
+                let hdrs = ["Content-Range": "bytes */420000"]
+                return (HTTPURLResponse(url: request.url!, statusCode: 416, httpVersion: "HTTP/1.1", headerFields: hdrs)!, Data())
+            }
+            let hdrs = ["Content-Range": "bytes */850000"]
+            return (HTTPURLResponse(url: request.url!, statusCode: 416, httpVersion: "HTTP/1.1", headerFields: hdrs)!, Data())
+        }
+
+        let tinyOk = await YTPlayerResolver.validateStreamURL(
+            url: URL(string: "https://cdn.example.com/tiny")!,
+            client: .iOS,
+            contentLength: nil,
+            cookie: nil,
+            session: session
+        )
+        XCTAssertTrue(tinyOk)
+
+        let cutoffRejected = await YTPlayerResolver.validateStreamURL(
+            url: URL(string: "https://cdn.example.com/cutoff850")!,
+            client: .iOS,
+            contentLength: nil,
+            cookie: nil,
+            session: session
+        )
+        XCTAssertFalse(cutoffRejected)
     }
 
     func testBundledEjsSolverLoadsInJavaScriptCore() throws {

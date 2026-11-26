@@ -30,7 +30,7 @@ public enum RootNavTab: String, CaseIterable, Sendable {
         switch self {
         case .home: return "house.fill"
         case .search: return "magnifyingglass"
-        case .library: return "square.stack.fill"
+        case .library: return "rectangle.stack.fill"
         case .settings: return "gearshape.fill"
         }
     }
@@ -39,7 +39,7 @@ public enum RootNavTab: String, CaseIterable, Sendable {
         switch self {
         case .home: return "house"
         case .search: return "magnifyingglass"
-        case .library: return "square.stack"
+        case .library: return "rectangle.stack"
         case .settings: return "gearshape"
         }
     }
@@ -98,6 +98,10 @@ public final class AppCoordinator {
     public var libraryPlaylists: [PlaylistEntity] = []
     public var libraryAlbums: [AlbumEntity] = []
     public var libraryArtists: [ArtistEntity] = []
+    public var recentlyPlayedSongs: [SongEntity] = []
+    public var mostPlayedSongs: [SongEntity] = []
+    public var importedPlaylistIds: Set<String> = []
+    public var songArtistsById: [String: String] = [:]
     public var downloadedSongIds: Set<String> = []
     public var speedDialItems: [SpeedDialItem] = []
     public var songEditsById: [String: SongEdit] = [:]
@@ -105,7 +109,7 @@ public final class AppCoordinator {
     public var currentLyrics: LyricsDocument?
     public var currentLyricsOffsetMs: Int = 0
     public var isLoadingLyrics = false
-    public var paletteColors: [Color] = [MochyTheme.defaultAccent, .indigo, .purple, .black]
+    public var paletteColors: [Color] = [Color(white: 0.24), Color(white: 0.15), Color(white: 0.08), .black]
     public var currentModuleSkin: ModuleSkinManifest = .defaultSkin
     public var videoStreamOptions: [YTVideoStreamOption] = []
 
@@ -232,15 +236,59 @@ public final class AppCoordinator {
         }
     }
 
+    public func artistDisplay(for song: SongEntity) -> String {
+        if let custom = songEditsById[song.id]?.artists, !custom.isEmpty {
+            return custom
+        }
+        if let mapped = songArtistsById[song.id], !mapped.isEmpty {
+            return mapped
+        }
+        if let album = song.albumName, !album.isEmpty {
+            return album
+        }
+        return "Unknown Artist"
+    }
+
     public func refreshLocalLibrary() {
         librarySongs = (try? database.fetchAllSongs()) ?? []
         libraryPlaylists = (try? database.fetchPlaylists()) ?? []
         libraryAlbums = (try? database.fetchAlbums()) ?? []
         libraryArtists = (try? database.fetchArtists()) ?? []
+        importedPlaylistIds = (try? database.fetchImportedPlaylistIds()) ?? []
         speedDialItems = (try? database.fetchSpeedDialItems()) ?? []
         recentSearches = (try? database.recentSearches()) ?? []
         let edits = (try? database.fetchAllSongEdits()) ?? []
         songEditsById = Dictionary(uniqueKeysWithValues: edits.map { ($0.songId, $0) })
+
+        let artistNamesById = Dictionary(uniqueKeysWithValues: libraryArtists.map { ($0.id, $0.name) })
+        let artistMaps = ((try? database.fetchAllSongArtistMaps()) ?? []).sorted { $0.position < $1.position }
+        var groupedArtists: [String: [String]] = [:]
+        for map in artistMaps {
+            if let name = artistNamesById[map.artistId], !name.isEmpty {
+                groupedArtists[map.songId, default: []].append(name)
+            }
+        }
+        songArtistsById = groupedArtists.mapValues { $0.joined(separator: ", ") }
+
+        let songsById = Dictionary(uniqueKeysWithValues: librarySongs.map { ($0.id, $0) })
+        var seenRecent = Set<String>()
+        var recentList: [SongEntity] = []
+        let events = (try? database.fetchRecentEvents(limit: 40)) ?? []
+        for ev in events {
+            if seenRecent.insert(ev.songId).inserted, let s = songsById[ev.songId] {
+                recentList.append(s)
+            }
+        }
+        let sortedByTime = librarySongs.sorted {
+            ($0.dateModified ?? $0.inLibrary ?? 0) > ($1.dateModified ?? $1.inLibrary ?? 0)
+        }
+        for s in sortedByTime where recentList.count < 24 {
+            if seenRecent.insert(s.id).inserted {
+                recentList.append(s)
+            }
+        }
+        recentlyPlayedSongs = Array(recentList.prefix(24))
+        mostPlayedSongs = ((try? database.fetchTopSongs(limit: 24)) ?? []).filter { $0.totalPlayTime > 0 }
     }
 
     public func refreshDownloadedState() async {
@@ -343,6 +391,12 @@ public final class AppCoordinator {
         }
         let startIdx = allSongs.firstIndex(where: { $0.id == song.id }) ?? 0
         player.playQueue(items, startIndex: startIdx, playlistId: playlistId)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        var touched = song
+        touched.dateModified = nowMs
+        if touched.inLibrary == nil { touched.inLibrary = nowMs }
+        try? database.upsertSong(touched)
+        refreshLocalLibrary()
         onTrackChanged()
     }
 
@@ -727,24 +781,47 @@ public final class AppCoordinator {
     }
 
     private func saveTrackMetadataToDB(_ track: YTTrackItem) {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let existing = try? database.fetchSong(id: track.id)
+        let upgradedThumb = ThumbnailURLUpgrader.upgrade(track.thumbnailURL) ?? existing?.thumbnailUrl
         let song = SongEntity(
             id: track.id,
             title: track.title,
-            duration: track.durationSeconds ?? -1,
-            thumbnailUrl: track.thumbnailURL,
-            albumName: track.album,
-            explicit: track.explicit,
-            isVideo: track.isVideo
+            duration: track.durationSeconds ?? existing?.duration ?? -1,
+            thumbnailUrl: upgradedThumb,
+            albumId: existing?.albumId,
+            albumName: track.album ?? existing?.albumName,
+            explicit: track.explicit || (existing?.explicit ?? false),
+            year: existing?.year,
+            date: existing?.date,
+            dateModified: nowMs,
+            liked: existing?.liked ?? false,
+            likedDate: existing?.likedDate,
+            totalPlayTime: existing?.totalPlayTime ?? 0,
+            inLibrary: existing?.inLibrary ?? nowMs,
+            dateDownload: existing?.dateDownload,
+            isLocal: existing?.isLocal ?? false,
+            libraryAddToken: existing?.libraryAddToken,
+            libraryRemoveToken: existing?.libraryRemoveToken,
+            lyricsOffset: existing?.lyricsOffset ?? 0,
+            romanizeLyrics: existing?.romanizeLyrics ?? true,
+            isDownloaded: existing?.isDownloaded ?? false,
+            isUploaded: existing?.isUploaded ?? false,
+            isVideo: track.isVideo || (existing?.isVideo ?? false),
+            localUri: existing?.localUri,
+            addedByLike: existing?.addedByLike ?? false,
+            genre: existing?.genre
         )
         let artists = track.artists.map { name in
-            ArtistEntity(id: "yt-a-\(name.lowercased())", name: name)
+            ArtistEntity(id: "yt-a-\(name.lowercased())", name: name, thumbnailUrl: upgradedThumb)
         }
         try? database.upsertSong(song, artists: artists)
         refreshLocalLibrary()
     }
 
     private func updatePalette(from urlString: String?) async {
-        guard let urlString, let url = URL(string: urlString),
+        guard let upgraded = ThumbnailURLUpgrader.upgrade(urlString, size: 360),
+              let url = URL(string: upgraded),
               let (data, _) = try? await URLSession.shared.data(from: url) else {
             return
         }

@@ -23,7 +23,7 @@ public struct SetupWizardView: View {
     public var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(red: 0.14, green: 0.06, blue: 0.12), .black, .black],
+                colors: [Color(white: 0.10), .black, .black],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -75,7 +75,7 @@ public struct SetupWizardView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(MochyTheme.defaultAccent)
+                    .tint(MochyTheme.buttonFill)
                     .controlSize(.large)
                 }
                 .padding(.horizontal, 22)
@@ -152,8 +152,8 @@ public struct SetupWizardView: View {
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 12)
-                                .background(sel ? MochyTheme.defaultAccent : MochyTheme.cardSurface)
-                                .foregroundStyle(.white)
+                                .background(sel ? Color.white : MochyTheme.cardSurface)
+                                .foregroundStyle(sel ? .black : .white)
                                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -176,7 +176,7 @@ public struct SetupWizardView: View {
                         Task { await coordinator.runPlaylistImport(urlString: quickImportURL) }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(MochyTheme.defaultAccent)
+                    .tint(MochyTheme.buttonFill)
                     .disabled(quickImportURL.trimmingCharacters(in: .whitespaces).isEmpty || coordinator.isImportingPlaylist)
                 }
                 if coordinator.isImportingPlaylist, let prog = coordinator.importProgress {

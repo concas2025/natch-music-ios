@@ -55,7 +55,7 @@ public struct SongShareStudioView: View {
     public var body: some View {
         let item = coordinator.player.currentItem
         let accent = coordinator.paletteColors.first ?? MochyTheme.defaultAccent
-        let c1 = coordinator.paletteColors.indices.contains(1) ? coordinator.paletteColors[1] : .indigo
+        let c1 = coordinator.paletteColors.indices.contains(1) ? coordinator.paletteColors[1] : Color(white: 0.14)
 
         NavigationStack {
             ScrollView(showsIndicators: false) {

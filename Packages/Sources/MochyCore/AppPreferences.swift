@@ -219,6 +219,7 @@ public enum PreferenceKeys {
     public static let profileAvatarPath = "profileAvatarPath"
     public static let customMonochromeServers = "customMonochromeServers"
     public static let webModuleURLs = "webModuleURLs"
+    public static let settingsSchemaVersion = "settingsSchemaVersion"
 }
 
 // MARK: - Observable Settings Store
@@ -371,7 +372,7 @@ public final class AppSettings {
         self.homeStyle = Self.decodeEnum(defaults, key: PreferenceKeys.homeStyle, fallback: .mochyy)
         self.playlistStyle = Self.decodeEnum(defaults, key: PreferenceKeys.playlistStyle, fallback: .modern)
         self.flagshipBackground = Self.decodeEnum(defaults, key: PreferenceKeys.flagshipBackground, fallback: .appleMusic)
-        self.seekbarStyle = Self.decodeEnum(defaults, key: PreferenceKeys.seekbarStyle, fallback: .wavy)
+        self.seekbarStyle = Self.decodeEnum(defaults, key: PreferenceKeys.seekbarStyle, fallback: .default)
         self.transportLayout = Self.decodeEnum(defaults, key: PreferenceKeys.transportLayout, fallback: .three)
         self.ipodTheme = Self.decodeEnum(defaults, key: PreferenceKeys.ipodTheme, fallback: .silver)
         self.ipodTallScreen = defaults.bool(forKey: PreferenceKeys.ipodTallScreen)
@@ -401,7 +402,7 @@ public final class AppSettings {
         self.lyricsOrderOverride = defaults.bool(forKey: PreferenceKeys.lyricsOrderOverride)
         self.offlineMode = defaults.bool(forKey: PreferenceKeys.offlineMode)
         self.sourceOrder = defaults.stringArray(forKey: PreferenceKeys.sourceOrder)
-            ?? ["monochrome", "jiosaavn", "youtube"]
+            ?? ["youtube", "monochrome", "jiosaavn"]
         self.canvasOrder = defaults.stringArray(forKey: PreferenceKeys.canvasOrder)
             ?? ["appleMusic", "monochrome", "spotify", "artistVideo"]
         self.ytExcludeImports = Self.decodeBool(defaults, key: PreferenceKeys.ytExcludeImports, default: true)
@@ -428,6 +429,19 @@ public final class AppSettings {
         self.profileAvatarPath = defaults.string(forKey: PreferenceKeys.profileAvatarPath)
         self.customMonochromeServers = defaults.stringArray(forKey: PreferenceKeys.customMonochromeServers) ?? []
         self.webModuleURLs = defaults.stringArray(forKey: PreferenceKeys.webModuleURLs) ?? []
+
+        let schemaVer = defaults.integer(forKey: PreferenceKeys.settingsSchemaVersion)
+        if schemaVer < 2 {
+            if self.seekbarStyle == .wavy {
+                self.seekbarStyle = .default
+                defaults.set(SeekbarStyle.default.rawValue, forKey: PreferenceKeys.seekbarStyle)
+            }
+            if self.sourceOrder == ["monochrome", "jiosaavn", "youtube"] {
+                self.sourceOrder = ["youtube", "monochrome", "jiosaavn"]
+                defaults.set(self.sourceOrder, forKey: PreferenceKeys.sourceOrder)
+            }
+            defaults.set(2, forKey: PreferenceKeys.settingsSchemaVersion)
+        }
     }
 
     private static func decodeEnum<T: RawRepresentable>(

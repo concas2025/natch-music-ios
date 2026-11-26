@@ -44,8 +44,8 @@ public actor InnerTubeClient {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.default
-            cfg.timeoutIntervalForRequest = 8
-            cfg.timeoutIntervalForResource = 16
+            cfg.timeoutIntervalForRequest = 5
+            cfg.timeoutIntervalForResource = 10
             self.session = URLSession(configuration: cfg)
         }
         self.encoder = JSONEncoder()
@@ -223,7 +223,7 @@ public actor InnerTubeClient {
         return request
     }
 
-    private func performWithRetry(_ request: URLRequest, maxAttempts: Int = 3) async throws -> (Data, HTTPURLResponse) {
+    private func performWithRetry(_ request: URLRequest, maxAttempts: Int = 2) async throws -> (Data, HTTPURLResponse) {
         var lastError: Error?
         for attempt in 0..<maxAttempts {
             do {
@@ -249,7 +249,7 @@ public actor InnerTubeClient {
             }
 
             if attempt + 1 < maxAttempts {
-                let backoffNs = UInt64(500_000_000) * UInt64(1 << attempt)
+                let backoffNs = UInt64(250_000_000) * UInt64(1 << attempt)
                 try? await Task.sleep(nanoseconds: backoffNs)
             }
         }

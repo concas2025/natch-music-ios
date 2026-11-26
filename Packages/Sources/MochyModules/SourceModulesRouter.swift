@@ -19,7 +19,7 @@ public enum SourceResolutionError: Error, LocalizedError {
 /// Multi-source router implementing Mochy Music's Just-In-Time resolution order:
 /// 1) Local / Offline bypass, 2) Forced route (`ProviderSwitch`), 3) Parallel speculative walk ahead of YouTube, 4) YouTube (`YTPlayerResolver`).
 public actor SourceModulesRouter {
-    private static let moduleTimeoutNs: UInt64 = 12_000_000_000
+    private static let moduleTimeoutNs: UInt64 = 3_500_000_000
     private static let failedSourceMemorySeconds: TimeInterval = 10 * 60
 
     private let youtubeResolver: YTPlayerResolver
@@ -63,7 +63,7 @@ public actor SourceModulesRouter {
         track: ModuleTrack,
         quality: AudioQuality = .high,
         preferMp4OnIOS: Bool = true,
-        sourceOrder: [String] = ["monochrome", "jiosaavn", "youtube"],
+        sourceOrder: [String] = ["youtube", "monochrome", "jiosaavn"],
         offlineMode: Bool = false,
         downloadedFileURL: URL? = nil
     ) async throws -> ModuleStream {

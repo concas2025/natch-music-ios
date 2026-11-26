@@ -77,8 +77,8 @@ public struct MixItEditorSheet: View {
                                     .font(.caption.weight(.semibold))
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 7)
-                                    .background(active ? accent : MochyTheme.cardSurface)
-                                    .foregroundStyle(.white)
+                                    .background(active ? Color.white : MochyTheme.cardSurface)
+                                    .foregroundStyle(active ? .black : .white)
                                     .clipShape(Capsule())
                                 }
                             }

@@ -117,7 +117,10 @@ let package = Package(
                 "MochyAudio",
                 "MochySync",
             ],
-            path: "Sources/MochyUI"
+            path: "Sources/MochyUI",
+            resources: [
+                .process("Resources"),
+            ]
         ),
         .testTarget(
             name: "MochyCoreTests",

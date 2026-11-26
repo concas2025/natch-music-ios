@@ -99,8 +99,8 @@ public actor YTPlayerResolver {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 6
-            cfg.timeoutIntervalForResource = 12
+            cfg.timeoutIntervalForRequest = 4
+            cfg.timeoutIntervalForResource = 8
             self.session = URLSession(configuration: cfg)
         }
         self.customValidator = customValidator
@@ -154,15 +154,21 @@ public actor YTPlayerResolver {
         let dataSync = await innerTube.dataSyncId
 
         var clientOrder: [YouTubeClient] = []
-        if Date() >= visionOSRestUntil {
-            clientOrder.append(.visionOS)
-        }
-        if isLoggedIn {
-            clientOrder.append(contentsOf: YouTubeClient.accountClients)
-        }
+        let allowVisionOS = Date() >= visionOSRestUntil
         for fallback in YouTubeClient.streamFallbackClients where !clientOrder.contains(fallback) {
+            if fallback == .visionOS && !allowVisionOS { continue }
             if fallback.loginRequired && !isLoggedIn { continue }
             clientOrder.append(fallback)
+            if isLoggedIn && fallback == .androidVRNoAuth {
+                for acct in YouTubeClient.accountClients where !clientOrder.contains(acct) {
+                    clientOrder.append(acct)
+                }
+            }
+        }
+        if isLoggedIn {
+            for acct in YouTubeClient.accountClients where !clientOrder.contains(acct) {
+                clientOrder.append(acct)
+            }
         }
 
         var lastReason: String?
@@ -225,8 +231,8 @@ public actor YTPlayerResolver {
                     preferMp4: preferMp4
                 )
 
-                for format in candidates {
-                    guard var rawURL = try? await resolveFormatURL(format: format) else {
+                for format in candidates.prefix(3) {
+                    guard var rawURL = try? await resolveFormatURL(format: format, client: client) else {
                         continue
                     }
                     if client.useWebPoTokens, let streamPot = poTokenResult?.streamingDataPoToken {
@@ -459,9 +465,15 @@ public actor YTPlayerResolver {
 
     // MARK: - URL Construction & Range Validation
 
-    internal func resolveFormatURL(format: PlayerResponse.StreamingData.Format) async throws -> String {
+    internal func resolveFormatURL(
+        format: PlayerResponse.StreamingData.Format,
+        client: YouTubeClient = .webRemix
+    ) async throws -> String {
         if let direct = format.url, !direct.isEmpty {
-            return (try? await ejsSolver.transformNParam(in: direct)) ?? direct
+            if client.useSignatureTimestamp {
+                return (try? await ejsSolver.transformNParam(in: direct)) ?? direct
+            }
+            return direct
         }
         if let cipher = format.signatureCipher ?? format.cipher {
             return try await ejsSolver.deobfuscateStreamURL(signatureCipher: cipher)
@@ -527,6 +539,12 @@ public actor YTPlayerResolver {
                 let fallbackTotal = http.expectedContentLength > 0 ? http.expectedContentLength : nil
                 return (true, totalFromRange ?? contentLength ?? fallbackTotal)
             }
+            if http.statusCode == 416,
+               contentLength == nil,
+               let totalFromRange = parseContentRangeTotal(http.value(forHTTPHeaderField: "Content-Range")),
+               totalFromRange > 0 && totalFromRange < 700_000 {
+                return (true, totalFromRange)
+            }
             // Reject 416 / 403 / 404: 416 at 1.15 MB indicates a truncated ~786 KB untokened preview stream.
             return (false, nil)
         } catch {
@@ -561,16 +579,18 @@ public actor YTPlayerResolver {
             "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
         ]
-        switch client.clientName {
-        case "WEB_REMIX":
-            headers["Origin"] = YouTubeClient.originYouTubeMusic
-            headers["Referer"] = "\(YouTubeClient.originYouTubeMusic)/"
-        case "WEB_CREATOR":
-            headers["Origin"] = YouTubeClient.originYouTubeStudio
-            headers["Referer"] = "\(YouTubeClient.originYouTubeStudio)/"
-        default:
-            headers["Origin"] = YouTubeClient.originYouTube
-            headers["Referer"] = "\(YouTubeClient.originYouTube)/"
+        if !client.isNativeStreamClient {
+            switch client.clientName {
+            case "WEB_REMIX":
+                headers["Origin"] = YouTubeClient.originYouTubeMusic
+                headers["Referer"] = "\(YouTubeClient.originYouTubeMusic)/"
+            case "WEB_CREATOR":
+                headers["Origin"] = YouTubeClient.originYouTubeStudio
+                headers["Referer"] = "\(YouTubeClient.originYouTubeStudio)/"
+            default:
+                headers["Origin"] = YouTubeClient.originYouTube
+                headers["Referer"] = "\(YouTubeClient.originYouTube)/"
+            }
         }
         if let cookie, !cookie.isEmpty {
             headers["Cookie"] = cookie
