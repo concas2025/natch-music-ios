@@ -1,0 +1,55 @@
+name: Build Natch Music iOS Simulator (Intel x86_64)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-simulator-x86_64:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build x86_64 iOS Simulator app (Deployment Target 17.0)
+        run: |
+          xcodebuild build \
+            -project NatchMusic.xcodeproj \
+            -scheme NatchMusic \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: Verify x86_64 slice and package SimulatorApp.zip
+        run: |
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator/NatchMusic.app"
+          lipo -info "$APP_PATH/NatchMusic"
+          ditto -c -k --keepParent "$APP_PATH" SimulatorApp.zip
+          ls -lh SimulatorApp.zip
+
+      - name: Upload SimulatorApp.zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimulatorApp
+          path: SimulatorApp.zip
+          retention-days: 30
