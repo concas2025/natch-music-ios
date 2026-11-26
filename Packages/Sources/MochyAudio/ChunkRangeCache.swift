@@ -114,7 +114,10 @@ public actor ChunkRangeCache {
         }
         var sum: Int64 = 0
         for case let url as URL in enumerator {
-            if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+            guard url.lastPathComponent != "index.json" else { continue }
+            if let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+               vals.isRegularFile == true,
+               let size = vals.fileSize {
                 sum += Int64(size)
             }
         }

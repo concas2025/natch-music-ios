@@ -33,12 +33,17 @@ final class MochyDSPTests: XCTestCase {
         XCTAssertFalse(fx.isSilent)
         XCTAssertGreaterThan(fx.currentLUFS, -60)
 
-        var silentL = [Float](repeating: 0, count: frames)
-        var silentR = [Float](repeating: 0, count: frames)
-        silentL.withUnsafeMutableBufferPointer { lBuf in
-            silentR.withUnsafeMutableBufferPointer { rBuf in
-                fx.process(left: lBuf.baseAddress!, right: rBuf.baseAddress!, frames: frames)
+        var silentL = [Float](repeating: 0, count: 4096)
+        var silentR = [Float](repeating: 0, count: 4096)
+        // Drain reverb tail before verifying silence detection
+        for _ in 0..<8 {
+            silentL.withUnsafeMutableBufferPointer { lBuf in
+                silentR.withUnsafeMutableBufferPointer { rBuf in
+                    fx.process(left: lBuf.baseAddress!, right: rBuf.baseAddress!, frames: 4096)
+                }
             }
+            silentL = [Float](repeating: 0, count: 4096)
+            silentR = [Float](repeating: 0, count: 4096)
         }
         XCTAssertTrue(fx.isSilent)
     }
