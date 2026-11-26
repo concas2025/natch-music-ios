@@ -1189,7 +1189,7 @@ public final class MochyAudioPlayer {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
-    private static func inferMimeType(codec: String, url: URL) -> String {
+    nonisolated private static func inferMimeType(codec: String, url: URL) -> String {
         let c = codec.lowercased()
         if c.contains("flac") { return "audio/flac" }
         if c.contains("mp3") { return "audio/mpeg" }
