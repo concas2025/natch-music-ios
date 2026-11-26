@@ -59,7 +59,7 @@ public struct StageParameters: Sendable, Equatable {
     }
 }
 
-public final class MochyStageEngine {
+public final class MochyStageEngine: @unchecked Sendable {
     private var handle: UnsafeMutableRawPointer?
 
     public init(sampleRate: Int = 48_000, channels: Int = 2) {
@@ -169,7 +169,7 @@ public struct MochyFXParameters: Sendable, Equatable {
     }
 }
 
-public final class MochyFXEngine {
+public final class MochyFXEngine: @unchecked Sendable {
     private var handle: UnsafeMutableRawPointer?
 
     public init(sampleRate: Double = 48_000) {
@@ -186,6 +186,11 @@ public final class MochyFXEngine {
         guard let handle else { return }
         var c = parameters.toC()
         mochy_fx_update(handle, &c)
+    }
+
+    public func reset() {
+        guard let handle else { return }
+        mochy_fx_reset(handle)
     }
 
     public func process(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frames: Int) {

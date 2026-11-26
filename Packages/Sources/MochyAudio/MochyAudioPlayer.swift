@@ -1,4 +1,3 @@
-import Accelerate
 import AVFoundation
 import Foundation
 import MediaPlayer
@@ -10,6 +9,12 @@ import MochyModules
 import Observation
 #if os(iOS) && canImport(CoreHaptics)
 import CoreHaptics
+#endif
+#if os(iOS) && canImport(MusicKit)
+import MusicKit
+#endif
+#if os(iOS) && canImport(UIKit)
+import UIKit
 #endif
 
 public enum RepeatMode: String, CaseIterable, Codable, Sendable {
@@ -67,12 +72,31 @@ public struct PlaybackItem: Sendable, Equatable, Identifiable {
             album: song.albumName,
             durationSeconds: song.duration > 0 ? song.duration : nil,
             thumbnailURL: song.thumbnailUrl,
-            localFileURL: song.localUri.flatMap(URL.init(string:))
+            localFileURL: Self.resolveLocalURI(song.localUri)
         )
+    }
+
+    /// Resolves both relative paths inside `ApplicationSupport/LocalAudio` (survives iOS container UUID updates)
+    /// and legacy `file://` URLs.
+    public static func resolveLocalURI(_ raw: String?) -> URL? {
+        guard let raw, !raw.isEmpty else { return nil }
+        if raw.hasPrefix("relative://") {
+            let rel = String(raw.dropFirst("relative://".count))
+            if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                let resolved = appSupport.appendingPathComponent(rel)
+                if FileManager.default.fileExists(atPath: resolved.path) {
+                    return resolved
+                }
+            }
+            return nil
+        }
+        return URL(string: raw)
     }
 }
 
-/// Dual-Deck AVAudioEngine + Remote AVPlayer Audio Controller matching Mochy Music's playback service.
+/// Unified Dual-Deck `AVPlayer` + `LocalAudioProxy` + Real-Time `MTAudioProcessingTap` C++ DSP Audio Controller.
+/// Routes BOTH remote progressive/fMP4 streams and local audio files through inline C++ `MochyFXEngine`,
+/// `MochyStageEngine` (KEMAR HRTF), `CrossmixEngine` (19 DJ styles), and `Accelerate` `vDSP` FFT.
 @MainActor
 @Observable
 public final class MochyAudioPlayer {
@@ -82,65 +106,130 @@ public final class MochyAudioPlayer {
     public private(set) var isBuffering: Bool = false
     public private(set) var currentTime: TimeInterval = 0
     public private(set) var duration: TimeInterval = 0
+    public private(set) var activeSourceId: String = ""
     public private(set) var activeSourceLabel: String = ""
     public private(set) var activeQualityBadge: String = ""
     public private(set) var activeStreamURL: URL?
     public private(set) var isDRMStream: Bool = false
-    public private(set) var spectrumBins: [Float] = Array(repeating: 0, count: 32)
+    public private(set) var spectrumBins: [Float] = Array(repeating: 0, count: SpectrumAnalyzer.binCount)
+    public private(set) var stageLevels: [Float] = Array(repeating: 0, count: 6)
     public private(set) var activeCrossmixStyle: CrossmixStyle = .silkBlend
+    public private(set) var isCrossmixing: Bool = false
     public private(set) var lastError: String?
+    public private(set) var sleepTimerRemainingSeconds: Int?
+    public private(set) var activePlaylistId: String?
 
     public var shuffleEnabled: Bool = false
     public var repeatMode: RepeatMode = .off
+
+    // Audio Lab DSP Controls (100% live via inline MTAudioProcessingTap)
     public var eqGainsDb: [Float] = Array(repeating: 0, count: 10) {
         didSet { syncDSPParameters() }
     }
-    public var stageParams = StageParameters() {
-        didSet { stageEngine.update(stageParams) }
+    public var preampDb: Float = 0 {
+        didSet { syncDSPParameters() }
     }
+    public var bassBoostDb: Float = 0 {
+        didSet { syncDSPParameters() }
+    }
+    public var trebleBoostDb: Float = 0 {
+        didSet { syncDSPParameters() }
+    }
+    public var warmth: Float = 0 {
+        didSet { syncDSPParameters() }
+    }
+    public var reverbMix: Float = 0 {
+        didSet { syncDSPParameters() }
+    }
+    public var playbackSpeed: Float = 1.0 {
+        didSet {
+            let clamped = max(0.5, min(2.0, playbackSpeed))
+            if isPlaying {
+                activePlayer?.rate = clamped
+            }
+            updateNowPlayingInfo()
+        }
+    }
+    public var stageParams = StageParameters() {
+        didSet { syncDSPParameters() }
+    }
+
+    /// Hook provided by `AppCoordinator` to fetch Up Next radio recommendations when nearing the end of the queue.
+    public var onRequestRadioContinuation: ((_ seedVideoId: String) async -> [PlaybackItem])?
+    /// Hook fired when a track passes the Last.fm scrobble threshold (`min(50% duration, 240s)`).
+    public var onTrackScrobbleEligible: ((_ item: PlaybackItem) -> Void)?
 
     public var currentItem: PlaybackItem? {
         guard queue.indices.contains(currentIndex) else { return nil }
         return queue[currentIndex]
     }
 
+    public let chunkCache: ChunkRangeCache
+    public let localProxy: LocalAudioProxy
+
     private let settings: AppSettings
     private let router: SourceModulesRouter
     private let database: MochyDatabase
-    private let chunkCache = ChunkRangeCache()
 
-    private let engine = AVAudioEngine()
-    private let deckA = AVAudioPlayerNode()
-    private let deckB = AVAudioPlayerNode()
-    private let pitchNode = AVAudioUnitTimePitch()
-    private let fxEngine = MochyFXEngine(sampleRate: 48_000)
-    private let stageEngine = MochyStageEngine(sampleRate: 48_000, channels: 2)
+    // Dual-Deck `AVPlayer` slots with dedicated inline C++ DSP taps.
+    private var primaryPlayer: AVPlayer?
+    private var primaryDSPContext = RealtimeDeckDSPContext(enableStageAndSpectrum: true)
+    private var primaryTimeObserver: Any?
+    private var primaryEndObserver: NSObjectProtocol?
+    private var primaryFailObserver: NSObjectProtocol?
+    private var primaryStatusObservation: NSKeyValueObservation?
 
-    private var remotePlayer: AVPlayer?
-    private var timeObserverToken: Any?
-    private var endObserver: NSObjectProtocol?
-    private var progressTimer: Timer?
+    private var secondaryPlayer: AVPlayer?
+    private var secondaryDSPContext = RealtimeDeckDSPContext(enableStageAndSpectrum: true)
+
+    private var activePlayer: AVPlayer? { primaryPlayer }
+    private var trackLoudnessDb: Double?
+    private var knownDurationSeconds: TimeInterval?
+
     private var loadGeneration: UInt64 = 0
     private var playRecordedForGeneration = false
-    private var usingAudioEngineDeck = false
+    private var scrobbleFiredForGeneration = false
+    private var recoveredMidTrackForGeneration = false
+    private var isFetchingRadio = false
+    private var wasPlayingBeforeInterruption = false
+
+    private var crossmixTimer: Timer?
+    private var crossmixInFlightForIndex: Int?
+    private var spectrumTimer: Timer?
+    private var sleepTimer: Timer?
+
+    private var cachedArtworkSongId: String?
+    private var cachedArtworkData: Data?
+    private var sessionObservers: [NSObjectProtocol] = []
 
     #if os(iOS) && canImport(CoreHaptics)
     private var hapticEngine: CHHapticEngine?
     private var lastHapticBeatTime: TimeInterval = 0
     #endif
 
-    public init(settings: AppSettings, router: SourceModulesRouter, database: MochyDatabase) {
+    public init(
+        settings: AppSettings,
+        router: SourceModulesRouter,
+        database: MochyDatabase,
+        chunkCache: ChunkRangeCache = ChunkRangeCache()
+    ) {
         self.settings = settings
         self.router = router
         self.database = database
+        self.chunkCache = chunkCache
+        self.localProxy = LocalAudioProxy(cache: chunkCache)
         setupAudioSessionAndRemoteCommands()
-        setupAudioEngineGraph()
+        syncDSPParameters()
+        startSpectrumPollingTimer()
     }
 
-    public func playQueue(_ items: [PlaybackItem], startIndex: Int = 0) {
+    // MARK: - Queue & Playback Transport
+
+    public func playQueue(_ items: [PlaybackItem], startIndex: Int = 0, playlistId: String? = nil) {
         guard !items.isEmpty else { return }
         self.queue = items
         self.currentIndex = max(0, min(startIndex, items.count - 1))
+        self.activePlaylistId = playlistId
         loadAndPlayCurrent()
     }
 
@@ -150,6 +239,63 @@ public final class MochyAudioPlayer {
             currentIndex = 0
             loadAndPlayCurrent()
         }
+    }
+
+    public func playNext(_ item: PlaybackItem) {
+        if queue.isEmpty {
+            playQueue([item], startIndex: 0)
+            return
+        }
+        let insertIdx = min(currentIndex + 1, queue.count)
+        queue.insert(item, at: insertIdx)
+    }
+
+    public func jumpToQueueIndex(_ index: Int) {
+        guard queue.indices.contains(index) else { return }
+        currentIndex = index
+        loadAndPlayCurrent()
+    }
+
+    public func moveQueueItem(fromOffsets: IndexSet, toOffset: Int) {
+        guard let currentId = currentItem?.id else { return }
+        var copy = queue
+        // Manual index move to avoid SwiftUI dependency inside MochyAudio.
+        let moving = fromOffsets.sorted().map { copy[$0] }
+        for idx in fromOffsets.sorted(by: >) {
+            copy.remove(at: idx)
+        }
+        let adjustedTarget = min(copy.count, toOffset - fromOffsets.filter { $0 < toOffset }.count)
+        copy.insert(contentsOf: moving, at: max(0, adjustedTarget))
+        queue = copy
+        if let newIdx = queue.firstIndex(where: { $0.id == currentId }) {
+            currentIndex = newIdx
+        }
+    }
+
+    public func removeQueueItem(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+        let removingCurrent = (index == currentIndex)
+        queue.remove(at: index)
+        if queue.isEmpty {
+            stopAllDecks()
+            currentIndex = 0
+            isPlaying = false
+            updateNowPlayingInfo()
+            return
+        }
+        if index < currentIndex {
+            currentIndex -= 1
+        } else if removingCurrent {
+            currentIndex = min(currentIndex, queue.count - 1)
+            loadAndPlayCurrent()
+        }
+    }
+
+    public func clearUpcomingQueue() {
+        guard queue.indices.contains(currentIndex) else { return }
+        let keep = queue[currentIndex]
+        queue = [keep]
+        currentIndex = 0
     }
 
     public func togglePlayPause() {
@@ -162,10 +308,13 @@ public final class MochyAudioPlayer {
 
     public func pause() {
         isPlaying = false
-        if usingAudioEngineDeck {
-            deckA.pause()
+        cancelActiveCrossmix()
+        if isDRMStream {
+            #if os(iOS) && canImport(MusicKit)
+            ApplicationMusicPlayer.shared.pause()
+            #endif
         } else {
-            remotePlayer?.pause()
+            primaryPlayer?.pause()
         }
         updateNowPlayingInfo()
     }
@@ -173,34 +322,33 @@ public final class MochyAudioPlayer {
     public func resume() {
         guard currentItem != nil else { return }
         isPlaying = true
-        if usingAudioEngineDeck {
-            if !engine.isRunning { try? engine.start() }
-            deckA.play()
+        if isDRMStream {
+            #if os(iOS) && canImport(MusicKit)
+            Task { try? await ApplicationMusicPlayer.shared.play() }
+            #endif
         } else {
-            remotePlayer?.play()
+            primaryPlayer?.play()
+            if abs(playbackSpeed - 1.0) > 0.01 {
+                primaryPlayer?.rate = playbackSpeed
+            }
         }
         updateNowPlayingInfo()
     }
 
     public func skipNext() {
         guard !queue.isEmpty else { return }
+        cancelActiveCrossmix()
         if repeatMode == .one {
             seek(to: 0)
+            if !isPlaying { resume() }
             return
         }
-        if shuffleEnabled && queue.count > 1 {
-            var next = Int.random(in: 0..<queue.count)
-            if next == currentIndex { next = (currentIndex + 1) % queue.count }
-            currentIndex = next
-        } else if currentIndex + 1 < queue.count {
-            currentIndex += 1
-        } else if repeatMode == .all {
-            currentIndex = 0
+        if let nextIdx = computeNextIndex() {
+            currentIndex = nextIdx
+            loadAndPlayCurrent()
         } else {
             pause()
-            return
         }
-        loadAndPlayCurrent()
     }
 
     public func skipPrevious() {
@@ -209,6 +357,7 @@ public final class MochyAudioPlayer {
             return
         }
         guard !queue.isEmpty else { return }
+        cancelActiveCrossmix()
         if currentIndex > 0 {
             currentIndex -= 1
         } else if repeatMode == .all {
@@ -220,8 +369,13 @@ public final class MochyAudioPlayer {
     public func seek(to seconds: TimeInterval) {
         let clamped = max(0, min(seconds, max(duration, 1)))
         currentTime = clamped
-        if !usingAudioEngineDeck, let remotePlayer {
-            remotePlayer.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
+        if isDRMStream {
+            #if os(iOS) && canImport(MusicKit)
+            ApplicationMusicPlayer.shared.playbackTime = clamped
+            #endif
+        } else if let primaryPlayer {
+            let target = CMTime(seconds: clamped, preferredTimescale: 600)
+            primaryPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         }
         updateNowPlayingInfo()
     }
@@ -235,15 +389,72 @@ public final class MochyAudioPlayer {
         }
     }
 
+    /// Returns a readable local audio file URL for the current track (for LyricsAutoSync & Share Studio MP4 export).
+    public func localAudioFileURLForCurrentTrack() async -> URL? {
+        guard let item = currentItem else { return nil }
+        if let local = item.localFileURL, FileManager.default.fileExists(atPath: local.path) {
+            return local
+        }
+        return await localProxy.completedFileURL(forTrackId: item.id)
+    }
+
+    // MARK: - Sleep Timer
+
+    public func setSleepTimer(minutes: Int) {
+        cancelSleepTimer()
+        guard minutes > 0 else { return }
+        sleepTimerRemainingSeconds = minutes * 60
+        sleepTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let rem = self.sleepTimerRemainingSeconds else { return }
+                if rem <= 1 {
+                    self.cancelSleepTimer()
+                    self.pause()
+                } else {
+                    self.sleepTimerRemainingSeconds = rem - 1
+                }
+            }
+        }
+    }
+
+    public func cancelSleepTimer() {
+        sleepTimer?.invalidate()
+        sleepTimer = nil
+        sleepTimerRemainingSeconds = nil
+    }
+
+    // MARK: - Real-Time C++ DSP Parameter Sync
+
     public func syncDSPParameters() {
+        let params = makeBaselineFXParameters()
+        let bypass = settings.audioPassEnabled
+        primaryDSPContext.updateFX(params, bypassAll: bypass)
+
+        var stg = stageParams
+        stg.enabled = !bypass && settings.dspStageEnabled
+        primaryDSPContext.updateStage(stg, enabled: stg.enabled)
+    }
+
+    private func makeBaselineFXParameters() -> MochyFXParameters {
         var params = MochyFXParameters()
         params.enabled = !settings.audioPassEnabled
         params.eqGainsDb = settings.dspEqEnabled ? eqGainsDb : Array(repeating: 0, count: 10)
+        params.bassBoostDb = bassBoostDb
+        params.trebleBoostDb = trebleBoostDb
+        params.warmth = warmth
+        params.reverbMix = reverbMix
         params.orbitRateHz = settings.dspOrbitEnabled ? 0.18 : 0.0
-        fxEngine.update(params)
 
-        stageParams.enabled = !settings.audioPassEnabled && settings.dspStageEnabled
-        stageEngine.update(stageParams)
+        var totalGainDb = preampDb
+        if settings.loudnessNormalizationEnabled, let loudness = trackLoudnessDb {
+            // Normalize tracks toward -14 LUFS target, capped cleanly to [-9, +6] dB.
+            let delta = Float(max(-9.0, min(6.0, -14.0 - loudness)))
+            totalGainDb += delta
+        }
+        params.replayGainDb = totalGainDb
+        params.limiterEnabled = true
+        params.crossmixGain = 1.0
+        return params
     }
 
     // MARK: - Just-In-Time Track Preparation (Generation Guarded)
@@ -253,42 +464,38 @@ public final class MochyAudioPlayer {
         loadGeneration &+= 1
         let gen = loadGeneration
         playRecordedForGeneration = false
+        scrobbleFiredForGeneration = false
+        recoveredMidTrackForGeneration = false
+        crossmixInFlightForIndex = nil
         lastError = nil
         isBuffering = true
         currentTime = resumeAtSeconds
-        duration = TimeInterval(item.durationSeconds ?? 0)
-        stopActivePlaybackNodes()
+        knownDurationSeconds = item.durationSeconds.map(TimeInterval.init)
+        duration = knownDurationSeconds ?? 0
+        stopAllDecks()
+        primaryDSPContext.resetState()
+
+        fetchAndCacheArtwork(for: item)
+        maybeAppendRadioContinuation()
 
         Task {
             do {
-                let cachedURL = await chunkCache.isFullyCached(mediaId: item.id)
-                    ? await chunkCache.completeFileURL(mediaId: item.id)
-                    : nil
-
-                let modTrack = ModuleTrack(
-                    id: item.id,
-                    title: item.title,
-                    artist: item.artist,
-                    durationSeconds: item.durationSeconds,
-                    isrc: item.isrc,
-                    localFileURL: item.localFileURL
-                )
-
-                let resolved = try await router.resolve(
-                    track: modTrack,
-                    quality: settings.audioQuality,
-                    preferMp4OnIOS: settings.preferMp4OnIOS,
-                    sourceOrder: settings.sourceOrder,
-                    offlineMode: settings.offlineMode,
-                    downloadedFileURL: cachedURL
-                )
-
+                let resolved = try await resolvePlayableStream(for: item)
                 guard gen == self.loadGeneration else { return }
 
+                self.activeSourceId = resolved.sourceId
                 self.activeSourceLabel = resolved.sourceLabel
                 self.activeQualityBadge = resolved.qualityBadge
                 self.activeStreamURL = resolved.url
                 self.isDRMStream = resolved.isDRM
+                self.trackLoudnessDb = resolved.loudnessDb
+                if let resolvedDur = resolved.durationSeconds, resolvedDur > 0 {
+                    self.knownDurationSeconds = TimeInterval(resolvedDur)
+                    if self.duration <= 0 {
+                        self.duration = TimeInterval(resolvedDur)
+                    }
+                }
+                self.syncDSPParameters()
 
                 #if os(iOS)
                 if settings.audioPassEnabled, let rate = resolved.sampleRate {
@@ -296,18 +503,14 @@ public final class MochyAudioPlayer {
                 }
                 #endif
 
-                if resolved.url.isFileURL {
-                    try playLocalAudioFile(url: resolved.url, generation: gen)
+                if resolved.isDRM && resolved.url.scheme == "musickit" {
+                    try await playMusicKitDRM(url: resolved.url, resumeAt: resumeAtSeconds, generation: gen)
                 } else {
-                    playRemoteAVPlayer(stream: resolved, resumeAt: resumeAtSeconds, generation: gen)
-                    Task.detached { [weak self] in
-                        await self?.chunkCache.prefetchFirstChunk(
-                            mediaId: item.id,
-                            url: resolved.url,
-                            headers: resolved.headers
-                        )
-                    }
+                    let assetURL = try await prepareAssetURL(for: item, resolved: resolved)
+                    guard gen == self.loadGeneration else { return }
+                    try await startPrimaryDeck(assetURL: assetURL, resumeAt: resumeAtSeconds, generation: gen)
                 }
+
                 self.isBuffering = false
                 self.isPlaying = true
                 self.updateNowPlayingInfo()
@@ -320,174 +523,512 @@ public final class MochyAudioPlayer {
         }
     }
 
-    private func playLocalAudioFile(url: URL, generation: UInt64) throws {
-        usingAudioEngineDeck = true
-        let file = try AVAudioFile(forReading: url)
-        let format = file.processingFormat
-        duration = Double(file.length) / format.sampleRate
-        if !engine.isRunning { try engine.start() }
+    private func resolvePlayableStream(for item: PlaybackItem) async throws -> ModuleStream {
+        let cachedURL = await chunkCache.isFullyCached(mediaId: item.id)
+            ? await chunkCache.completeFileURL(mediaId: item.id)
+            : nil
 
-        deckA.scheduleFile(file, at: nil) { [weak self] in
-            Task { @MainActor in
-                guard let self, self.loadGeneration == generation, self.isPlaying else { return }
-                self.skipNext()
-            }
-        }
-        deckA.play()
-        startLocalProgressTimer(generation: generation)
+        let modTrack = ModuleTrack(
+            id: item.id,
+            title: item.title,
+            artist: item.artist,
+            durationSeconds: item.durationSeconds,
+            isrc: item.isrc,
+            localFileURL: item.localFileURL
+        )
+
+        return try await router.resolve(
+            track: modTrack,
+            quality: settings.audioQuality,
+            preferMp4OnIOS: settings.preferMp4OnIOS,
+            sourceOrder: settings.sourceOrder,
+            offlineMode: settings.offlineMode,
+            downloadedFileURL: cachedURL
+        )
     }
 
-    private func playRemoteAVPlayer(stream: ModuleStream, resumeAt: TimeInterval, generation: UInt64) {
-        usingAudioEngineDeck = false
-        let asset: AVURLAsset
-        if stream.headers.isEmpty {
-            asset = AVURLAsset(url: stream.url)
-        } else {
-            asset = AVURLAsset(url: stream.url, options: ["AVURLAssetHTTPHeaderFieldsKey": stream.headers])
+    private func prepareAssetURL(for item: PlaybackItem, resolved: ModuleStream) async throws -> URL {
+        if resolved.url.isFileURL {
+            return resolved.url
         }
+
+        let mime = resolved.mimeType ?? Self.inferMimeType(codec: resolved.codec, url: resolved.url)
+        let descriptor = ProxyStreamDescriptor(
+            trackId: item.id,
+            url: resolved.url,
+            headers: resolved.headers,
+            mimeType: mime,
+            contentLength: resolved.contentLength
+        )
+
+        let routerRef = self.router
+        let quality = self.settings.audioQuality
+        let preferMp4 = self.settings.preferMp4OnIOS
+        let sourceOrder = self.settings.sourceOrder
+        let modTrack = ModuleTrack(
+            id: item.id,
+            title: item.title,
+            artist: item.artist,
+            durationSeconds: item.durationSeconds,
+            isrc: item.isrc,
+            localFileURL: nil
+        )
+
+        return try await localProxy.registerStream(descriptor) { _ in
+            guard let refreshed = try? await routerRef.resolve(
+                track: modTrack,
+                quality: quality,
+                preferMp4OnIOS: preferMp4,
+                sourceOrder: sourceOrder,
+                offlineMode: false,
+                downloadedFileURL: nil
+            ), !refreshed.url.isFileURL else {
+                return nil
+            }
+            let refreshedMime = refreshed.mimeType ?? Self.inferMimeType(codec: refreshed.codec, url: refreshed.url)
+            return ProxyStreamDescriptor(
+                trackId: item.id,
+                url: refreshed.url,
+                headers: refreshed.headers,
+                mimeType: refreshedMime,
+                contentLength: refreshed.contentLength
+            )
+        }
+    }
+
+    private func startPrimaryDeck(assetURL: URL, resumeAt: TimeInterval, generation: UInt64) async throws {
+        let asset = AVURLAsset(url: assetURL)
         let playerItem = AVPlayerItem(asset: asset)
+        if let mix = await AudioProcessingTapBinder.makeAudioMix(for: asset, context: primaryDSPContext) {
+            playerItem.audioMix = mix
+        }
+
         let player = AVPlayer(playerItem: playerItem)
-        self.remotePlayer = player
+        player.automaticallyWaitsToMinimizeStalling = true
+        self.primaryPlayer = player
+
+        attachPrimaryObservers(player: player, playerItem: playerItem, generation: generation)
 
         if resumeAt > 0 {
-            player.seek(to: CMTime(seconds: resumeAt, preferredTimescale: 600))
+            await player.seek(to: CMTime(seconds: resumeAt, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         }
+        player.play()
+        if abs(playbackSpeed - 1.0) > 0.01 {
+            player.rate = playbackSpeed
+        }
+    }
 
-        endObserver = NotificationCenter.default.addObserver(
+    private func attachPrimaryObservers(player: AVPlayer, playerItem: AVPlayerItem, generation: UInt64) {
+        primaryEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: playerItem,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.loadGeneration == generation else { return }
+                guard let self, self.loadGeneration == generation, !self.isCrossmixing else { return }
                 self.skipNext()
             }
         }
 
-        timeObserverToken = player.addPeriodicTimeObserver(
+        primaryFailObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: playerItem,
+            queue: .main
+        ) { [weak self] note in
+            let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            Task { @MainActor in
+                guard let self, self.loadGeneration == generation else { return }
+                self.handleMidTrackPlaybackFailure(error: err, generation: generation)
+            }
+        }
+
+        primaryStatusObservation = playerItem.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            let err = item.error
+            Task { @MainActor in
+                guard let self, self.loadGeneration == generation else { return }
+                self.handleMidTrackPlaybackFailure(error: err, generation: generation)
+            }
+        }
+
+        primaryTimeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
         ) { [weak self] cmTime in
             Task { @MainActor in
                 guard let self, self.loadGeneration == generation else { return }
                 let secs = cmTime.seconds
-                if secs.isFinite {
+                if secs.isFinite && secs >= 0 {
                     self.currentTime = secs
-                    if secs >= 25 && !self.playRecordedForGeneration, let item = self.currentItem {
-                        self.playRecordedForGeneration = true
-                        try? self.database.recordPlayEvent(songId: item.id, playTimeMs: Int64(secs * 1000))
+                    self.handlePlaybackMilestones(elapsed: secs)
+                }
+
+                let reported = playerItem.duration.seconds
+                let effective = MP4DurationNormalizer.resolveEffectiveDuration(
+                    reported: reported,
+                    known: self.knownDurationSeconds
+                )
+                if effective > 0 {
+                    self.duration = effective
+                }
+
+                self.evaluateCrossmixTrigger(generation: generation)
+            }
+        }
+    }
+
+    private func handlePlaybackMilestones(elapsed: TimeInterval) {
+        guard let item = currentItem else { return }
+        if elapsed >= 25 && !playRecordedForGeneration {
+            playRecordedForGeneration = true
+            try? database.recordPlayEvent(songId: item.id, playTimeMs: Int64(elapsed * 1000))
+        }
+        let scrobbleTarget = duration > 0 ? min(duration * 0.5, 240.0) : 30.0
+        if elapsed >= max(20.0, scrobbleTarget) && !scrobbleFiredForGeneration {
+            scrobbleFiredForGeneration = true
+            onTrackScrobbleEligible?(item)
+        }
+    }
+
+    private func handleMidTrackPlaybackFailure(error: Error?, generation: UInt64) {
+        guard generation == loadGeneration else { return }
+        if !recoveredMidTrackForGeneration, let item = currentItem {
+            recoveredMidTrackForGeneration = true
+            let resumePos = currentTime
+            let failedSrc = activeSourceId.isEmpty ? "youtube" : activeSourceId
+            Task {
+                await router.markSourceFailed(sourceId: failedSrc, trackId: item.id)
+                loadAndPlayCurrent(resumeAtSeconds: resumePos)
+            }
+            return
+        }
+        isBuffering = false
+        isPlaying = false
+        lastError = error?.localizedDescription ?? "Stream playback interrupted."
+    }
+
+    private func playMusicKitDRM(url: URL, resumeAt: TimeInterval, generation: UInt64) async throws {
+        #if os(iOS) && canImport(MusicKit)
+        let trackId = url.lastPathComponent
+        var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: MusicItemID(trackId))
+        req.limit = 1
+        let resp = try await req.response()
+        guard let song = resp.items.first, generation == loadGeneration else {
+            throw SourceResolutionError.failedAllSources("Apple Music catalog item not found.")
+        }
+        let appPlayer = ApplicationMusicPlayer.shared
+        appPlayer.queue = [song]
+        try await appPlayer.play()
+        if resumeAt > 0 {
+            appPlayer.playbackTime = resumeAt
+        }
+        #else
+        throw SourceResolutionError.failedAllSources("Apple Music FairPlay playback is iOS-only.")
+        #endif
+    }
+
+    // MARK: - Dual-Deck Crossmix / MixIt Transition Execution (19 DJ Styles)
+
+    private func evaluateCrossmixTrigger(generation: UInt64) {
+        guard isPlaying,
+              !settings.audioPassEnabled,
+              settings.crossmixMode != .off,
+              !isCrossmixing,
+              duration > 15,
+              let nextIdx = computeNextIndex(),
+              crossmixInFlightForIndex != nextIdx else {
+            return
+        }
+
+        let currentTrack = currentItem
+        let nextTrack = queue[nextIdx]
+        let customTransition: PlaylistTransition?
+        if let playlistId = activePlaylistId, let fromId = currentTrack?.id {
+            let saved = (try? database.fetchTransitions(playlistId: playlistId)) ?? []
+            customTransition = saved.first { $0.fromSongId == fromId && $0.toSongId == nextTrack.id }
+        } else {
+            customTransition = nil
+        }
+
+        let outProfile = TrackAudioProfile(
+            bpm: 120,
+            averageRMS: 0.25,
+            introSeconds: 0,
+            outroStartSeconds: max(0, duration - Double(settings.crossmixDurationMs) / 1000.0)
+        )
+        let inProfile = TrackAudioProfile(
+            bpm: 120,
+            averageRMS: 0.25,
+            introSeconds: 0,
+            outroStartSeconds: Double(max(0, (nextTrack.durationSeconds ?? 180) - 8))
+        )
+
+        let plan = CrossmixPlanner.plan(
+            from: outProfile,
+            to: inProfile,
+            durationSeconds: max(1.5, Double(settings.crossmixDurationMs) / 1000.0),
+            customTransition: customTransition
+        )
+
+        let remaining = duration - currentTime
+        let triggerRemaining = customTransition != nil ? max(1.5, duration - plan.outStartSeconds) : plan.durationSeconds
+        guard remaining > 0.4, remaining <= triggerRemaining else { return }
+
+        crossmixInFlightForIndex = nextIdx
+        startCrossmixTransition(toIndex: nextIdx, plan: plan, custom: customTransition, generation: generation)
+    }
+
+    private func startCrossmixTransition(
+        toIndex nextIdx: Int,
+        plan: CrossmixPlan,
+        custom: PlaylistTransition?,
+        generation: UInt64
+    ) {
+        guard queue.indices.contains(nextIdx) else { return }
+        let nextItem = queue[nextIdx]
+        isCrossmixing = true
+        activeCrossmixStyle = plan.style
+
+        Task {
+            do {
+                let resolved = try await resolvePlayableStream(for: nextItem)
+                guard generation == self.loadGeneration, self.isCrossmixing else { return }
+                let assetURL = try await prepareAssetURL(for: nextItem, resolved: resolved)
+                guard generation == self.loadGeneration, self.isCrossmixing else { return }
+
+                let asset = AVURLAsset(url: assetURL)
+                let nextPlayerItem = AVPlayerItem(asset: asset)
+                secondaryDSPContext.resetState()
+                let initialPair = plan.style.deckParameters(
+                    progress: 0,
+                    bpm: plan.bpm,
+                    outVoiceLevel: custom?.outVoiceLevel ?? 1.0,
+                    outBassLevel: custom?.outBassLevel ?? 1.0,
+                    inVoiceLevel: custom?.inVoiceLevel ?? 1.0,
+                    inBassLevel: custom?.inBassLevel ?? 1.0
+                )
+                secondaryDSPContext.updateFX(mergeWithBaseline(initialPair.incoming), bypassAll: false)
+
+                if let mix = await AudioProcessingTapBinder.makeAudioMix(for: asset, context: secondaryDSPContext) {
+                    nextPlayerItem.audioMix = mix
+                }
+
+                let incomingPlayer = AVPlayer(playerItem: nextPlayerItem)
+                self.secondaryPlayer = incomingPlayer
+                if plan.inStartSeconds > 0 {
+                    await incomingPlayer.seek(to: CMTime(seconds: plan.inStartSeconds, preferredTimescale: 600))
+                }
+                incomingPlayer.play()
+
+                let startedAt = Date()
+                let totalDur = max(1.0, plan.durationSeconds)
+
+                crossmixTimer?.invalidate()
+                crossmixTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self, self.loadGeneration == generation, self.isCrossmixing else { return }
+                        let t = Float(min(1.0, Date().timeIntervalSince(startedAt) / totalDur))
+                        let curves = plan.style.deckParameters(
+                            progress: t,
+                            bpm: plan.bpm,
+                            outVoiceLevel: custom?.outVoiceLevel ?? 1.0,
+                            outBassLevel: custom?.outBassLevel ?? 1.0,
+                            inVoiceLevel: custom?.inVoiceLevel ?? 1.0,
+                            inBassLevel: custom?.inBassLevel ?? 1.0
+                        )
+                        self.primaryDSPContext.updateFX(self.mergeWithBaseline(curves.outgoing), bypassAll: false)
+                        self.secondaryDSPContext.updateFX(self.mergeWithBaseline(curves.incoming), bypassAll: false)
+
+                        if t >= 1.0 {
+                            self.finishCrossmixSwap(
+                                newIndex: nextIdx,
+                                incomingPlayer: incomingPlayer,
+                                incomingItem: nextPlayerItem,
+                                resolved: resolved
+                            )
+                        }
                     }
                 }
-                let total = playerItem.duration.seconds
-                if total.isFinite && total > 0 {
-                    self.duration = total
-                }
-                if self.isPlaying {
-                    self.updateSimulatedSpectrumIfRemote()
-                }
-            }
-        }
-
-        player.play()
-    }
-
-    private func startLocalProgressTimer(generation: UInt64) {
-        progressTimer?.invalidate()
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.loadGeneration == generation, self.isPlaying else { return }
-                self.currentTime = min(self.duration, self.currentTime + 0.25)
-                if self.currentTime >= 25 && !self.playRecordedForGeneration, let item = self.currentItem {
-                    self.playRecordedForGeneration = true
-                    try? self.database.recordPlayEvent(songId: item.id, playTimeMs: Int64(self.currentTime * 1000))
-                }
+            } catch {
+                self.cancelActiveCrossmix()
             }
         }
     }
 
-    private func stopActivePlaybackNodes() {
-        deckA.stop()
-        deckB.stop()
-        progressTimer?.invalidate()
-        progressTimer = nil
-        if let token = timeObserverToken, let rp = remotePlayer {
-            rp.removeTimeObserver(token)
-            timeObserverToken = nil
-        }
-        if let endObs = endObserver {
-            NotificationCenter.default.removeObserver(endObs)
-            endObserver = nil
-        }
-        remotePlayer?.pause()
-        remotePlayer = nil
-    }
+    private func finishCrossmixSwap(
+        newIndex: Int,
+        incomingPlayer: AVPlayer,
+        incomingItem: AVPlayerItem,
+        resolved: ModuleStream
+    ) {
+        crossmixTimer?.invalidate()
+        crossmixTimer = nil
+        isCrossmixing = false
+        crossmixInFlightForIndex = nil
 
-    // MARK: - AVAudioEngine Setup & DSP Tap
+        // Tear down old primary player and promote secondary deck to primary seamlessly.
+        tearDownPrimaryObservers()
+        primaryPlayer?.pause()
+        primaryPlayer = incomingPlayer
+        secondaryPlayer = nil
 
-    private func setupAudioEngineGraph() {
-        engine.attach(deckA)
-        engine.attach(deckB)
-        engine.attach(pitchNode)
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
-        engine.connect(deckA, to: pitchNode, format: format)
-        engine.connect(deckB, to: engine.mainMixerNode, format: format)
-        engine.connect(pitchNode, to: engine.mainMixerNode, format: format)
+        let swappedContext = secondaryDSPContext
+        secondaryDSPContext = primaryDSPContext
+        primaryDSPContext = swappedContext
 
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self, let channelData = buffer.floatChannelData else { return }
-            let frames = Int(buffer.frameLength)
-            if frames > 0 && buffer.format.channelCount >= 2 {
-                self.fxEngine.process(left: channelData[0], right: channelData[1], frames: frames)
-                if !self.settings.audioPassEnabled && self.settings.dspStageEnabled {
-                    self.stageEngine.process(left: channelData[0], right: channelData[1], frames: frames)
-                }
-                let bins = Self.computeSpectrumBins(samples: channelData[0], count: frames)
-                Task { @MainActor in
-                    self.spectrumBins = bins
-                    self.triggerBassHapticIfNeeded(energy: bins.prefix(4).reduce(0, +) / 4.0)
-                }
-            }
-        }
+        loadGeneration &+= 1
+        let gen = loadGeneration
+        currentIndex = newIndex
+        playRecordedForGeneration = false
+        scrobbleFiredForGeneration = false
+        recoveredMidTrackForGeneration = false
+        activeSourceId = resolved.sourceId
+        activeSourceLabel = resolved.sourceLabel
+        activeQualityBadge = resolved.qualityBadge
+        activeStreamURL = resolved.url
+        isDRMStream = resolved.isDRM
+        trackLoudnessDb = resolved.loudnessDb
+        knownDurationSeconds = (resolved.durationSeconds ?? currentItem?.durationSeconds).map(TimeInterval.init)
+        duration = knownDurationSeconds ?? 0
+
         syncDSPParameters()
-    }
-
-    private static func computeSpectrumBins(samples: UnsafePointer<Float>, count: Int) -> [Float] {
-        let binCount = 32
-        var bins = [Float](repeating: 0, count: binCount)
-        let step = max(1, count / binCount)
-        for b in 0..<binCount {
-            var peak: Float = 0
-            let start = b * step
-            let end = min(count, start + step)
-            for i in start..<end {
-                peak = max(peak, abs(samples[i]))
-            }
-            bins[b] = min(1.0, peak * 1.8)
+        attachPrimaryObservers(player: incomingPlayer, playerItem: incomingItem, generation: gen)
+        if let item = currentItem {
+            fetchAndCacheArtwork(for: item)
         }
-        return bins
+        maybeAppendRadioContinuation()
+        updateNowPlayingInfo()
     }
 
-    private func updateSimulatedSpectrumIfRemote() {
-        // Light rhythmic envelope fallback when AVPlayer bypasses engine PCM tap
-        let t = currentTime
-        spectrumBins = (0..<32).map { idx in
-            let wave = abs(sin(t * 4.2 + Double(idx) * 0.45)) * 0.65 + 0.15
-            return Float(wave)
+    private func mergeWithBaseline(_ curve: MochyFXParameters) -> MochyFXParameters {
+        var merged = makeBaselineFXParameters()
+        merged.crossmixGain = curve.crossmixGain
+        merged.lowCutHz = curve.lowCutHz
+        merged.highCutHz = curve.highCutHz
+        merged.bassCut = curve.bassCut
+        merged.vocalCenterCut = curve.vocalCenterCut
+        merged.sideCut = curve.sideCut
+        merged.echoMix = curve.echoMix
+        merged.echoDelayMs = curve.echoDelayMs
+        merged.flangerMix = curve.flangerMix
+        merged.crushMix = curve.crushMix
+        merged.reverbMix = max(merged.reverbMix, curve.reverbMix)
+        merged.warmth = max(merged.warmth, curve.warmth)
+        merged.orbitRateHz = max(merged.orbitRateHz, curve.orbitRateHz)
+        return merged
+    }
+
+    private func cancelActiveCrossmix() {
+        crossmixTimer?.invalidate()
+        crossmixTimer = nil
+        if isCrossmixing {
+            isCrossmixing = false
+            secondaryPlayer?.pause()
+            secondaryPlayer = nil
+            syncDSPParameters()
+        }
+    }
+
+    // MARK: - Radio Continuation & Deck Cleanup
+
+    private func computeNextIndex() -> Int? {
+        guard !queue.isEmpty else { return nil }
+        if shuffleEnabled && queue.count > 1 {
+            var next = Int.random(in: 0..<queue.count)
+            if next == currentIndex { next = (currentIndex + 1) % queue.count }
+            return next
+        }
+        if currentIndex + 1 < queue.count {
+            return currentIndex + 1
+        }
+        if repeatMode == .all {
+            return 0
+        }
+        return nil
+    }
+
+    private func maybeAppendRadioContinuation() {
+        guard settings.infiniteQueueEnabled,
+              !settings.offlineMode,
+              !isFetchingRadio,
+              let seed = currentItem,
+              seed.localFileURL == nil,
+              currentIndex >= queue.count - 2,
+              let continuation = onRequestRadioContinuation else {
+            return
+        }
+        isFetchingRadio = true
+        let seedId = seed.id
+        Task {
+            defer { self.isFetchingRadio = false }
+            let fetched = await continuation(seedId)
+            let existingIds = Set(self.queue.map(\.id))
+            let unique = fetched.filter { !existingIds.contains($0.id) }
+            if !unique.isEmpty {
+                self.queue.append(contentsOf: unique)
+            }
+        }
+    }
+
+    private func tearDownPrimaryObservers() {
+        if let token = primaryTimeObserver, let p = primaryPlayer {
+            p.removeTimeObserver(token)
+            primaryTimeObserver = nil
+        }
+        if let endObs = primaryEndObserver {
+            NotificationCenter.default.removeObserver(endObs)
+            primaryEndObserver = nil
+        }
+        if let failObs = primaryFailObserver {
+            NotificationCenter.default.removeObserver(failObs)
+            primaryFailObserver = nil
+        }
+        primaryStatusObservation?.invalidate()
+        primaryStatusObservation = nil
+    }
+
+    private func stopAllDecks() {
+        cancelActiveCrossmix()
+        tearDownPrimaryObservers()
+        primaryPlayer?.pause()
+        primaryPlayer = nil
+        secondaryPlayer?.pause()
+        secondaryPlayer = nil
+    }
+
+    // MARK: - Real-Time FFT Spectrum Polling & CoreHaptics
+
+    private func startSpectrumPollingTimer() {
+        spectrumTimer?.invalidate()
+        spectrumTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.isPlaying && !self.isDRMStream {
+                    let snap = self.primaryDSPContext.spectrumSnapshot()
+                    self.spectrumBins = snap.bins
+                    if self.settings.dspStageEnabled && !self.settings.audioPassEnabled {
+                        self.stageLevels = self.primaryDSPContext.stageLevels()
+                    }
+                    self.triggerBassHapticIfNeeded(energy: snap.bassEnergy)
+                } else if self.spectrumBins.contains(where: { $0 > 0.01 }) {
+                    self.spectrumBins = self.spectrumBins.map { $0 * 0.72 }
+                }
+            }
         }
     }
 
     private func triggerBassHapticIfNeeded(energy: Float) {
         #if os(iOS) && canImport(CoreHaptics)
-        guard settings.hapticsEnabled, energy > 0.68 else { return }
+        guard settings.hapticsEnabled, energy > 0.65 else { return }
         let now = Date().timeIntervalSince1970
-        guard now - lastHapticBeatTime > 0.18 else { return }
+        guard now - lastHapticBeatTime > 0.16 else { return }
         lastHapticBeatTime = now
         if hapticEngine == nil {
             hapticEngine = try? CHHapticEngine()
             try? hapticEngine?.start()
         }
         let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: min(1.0, energy))
-        let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.35)
+        let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.32)
         let event = CHHapticEvent(eventType: .hapticTransient, parameters: [intensity, sharpness], relativeTime: 0)
         if let pattern = try? CHHapticPattern(events: [event], parameters: []),
            let player = try? hapticEngine?.makePlayer(with: pattern) {
@@ -496,11 +1037,66 @@ public final class MochyAudioPlayer {
         #endif
     }
 
+    // MARK: - AVAudioSession Interruptions, Route Changes & Lock Screen Artwork
+
     private func setupAudioSessionAndRemoteCommands() {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
         try? session.setActive(true)
+
+        let intObs = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] note in
+            guard let info = note.userInfo,
+                  let typeRaw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
+            let optionsRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+            Task { @MainActor in
+                guard let self else { return }
+                switch type {
+                case .began:
+                    self.wasPlayingBeforeInterruption = self.isPlaying
+                    if self.isPlaying { self.pause() }
+                case .ended:
+                    if options.contains(.shouldResume) && self.wasPlayingBeforeInterruption {
+                        try? AVAudioSession.sharedInstance().setActive(true)
+                        self.resume()
+                    }
+                    self.wasPlayingBeforeInterruption = false
+                @unknown default:
+                    break
+                }
+            }
+        }
+
+        let routeObs = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] note in
+            guard let reasonRaw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw) else { return }
+            if reason == .oldDeviceUnavailable {
+                Task { @MainActor in self?.pause() }
+            }
+        }
+
+        let resetObs = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
+                try? AVAudioSession.sharedInstance().setActive(true)
+                self?.syncDSPParameters()
+            }
+        }
+        sessionObservers = [intObs, routeObs, resetObs]
         #endif
 
         let commandCenter = MPRemoteCommandCenter.shared()
@@ -510,6 +1106,10 @@ public final class MochyAudioPlayer {
         }
         commandCenter.pauseCommand.addTarget { [weak self] _ in
             Task { @MainActor in self?.pause() }
+            return .success
+        }
+        commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.togglePlayPause() }
             return .success
         }
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
@@ -527,6 +1127,41 @@ public final class MochyAudioPlayer {
             }
             return .commandFailed
         }
+        commandCenter.changeShuffleModeCommand.addTarget { [weak self] event in
+            if let shuf = event as? MPChangeShuffleModeCommandEvent {
+                Task { @MainActor in self?.shuffleEnabled = (shuf.shuffleType != .off) }
+                return .success
+            }
+            return .commandFailed
+        }
+        commandCenter.changeRepeatModeCommand.addTarget { [weak self] event in
+            if let rep = event as? MPChangeRepeatModeCommandEvent {
+                Task { @MainActor in
+                    switch rep.repeatType {
+                    case .off: self?.repeatMode = .off
+                    case .one: self?.repeatMode = .one
+                    case .all: self?.repeatMode = .all
+                    @unknown default: self?.repeatMode = .off
+                    }
+                }
+                return .success
+            }
+            return .commandFailed
+        }
+    }
+
+    private func fetchAndCacheArtwork(for item: PlaybackItem) {
+        guard cachedArtworkSongId != item.id else { return }
+        cachedArtworkSongId = item.id
+        cachedArtworkData = nil
+        guard let urlStr = item.thumbnailURL, let url = URL(string: urlStr) else { return }
+        let targetId = item.id
+        Task {
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  self.currentItem?.id == targetId else { return }
+            self.cachedArtworkData = data
+            self.updateNowPlayingInfo()
+        }
     }
 
     private func updateNowPlayingInfo() {
@@ -538,7 +1173,7 @@ public final class MochyAudioPlayer {
             MPMediaItemPropertyTitle: item.title,
             MPMediaItemPropertyArtist: item.artist,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(playbackSpeed) : 0.0,
         ]
         if duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = duration
@@ -546,6 +1181,20 @@ public final class MochyAudioPlayer {
         if let album = item.album {
             info[MPMediaItemPropertyAlbumTitle] = album
         }
+        #if os(iOS) && canImport(UIKit)
+        if let data = cachedArtworkData, let image = UIImage(data: data) {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        }
+        #endif
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private static func inferMimeType(codec: String, url: URL) -> String {
+        let c = codec.lowercased()
+        if c.contains("flac") { return "audio/flac" }
+        if c.contains("mp3") { return "audio/mpeg" }
+        if c.contains("wav") { return "audio/wav" }
+        if url.pathExtension.lowercased() == "mp4" { return "video/mp4" }
+        return "audio/mp4"
     }
 }

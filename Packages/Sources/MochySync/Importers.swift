@@ -164,7 +164,11 @@ public struct TransferArchivePayload: Codable, Sendable, Equatable {
     public let schemaVersion: Int
     public let exportedAt: Date
     public let songs: [SongEntity]
+    public let artists: [ArtistEntity]?
+    public let songArtistMaps: [SongArtistMap]?
+    public let albums: [AlbumEntity]?
     public let playlists: [PlaylistEntity]
+    public let playlistSongMaps: [PlaylistSongMap]?
     public let songEdits: [SongEdit]
     public let transitions: [PlaylistTransition]
     public let speedDial: [SpeedDialItem]
@@ -176,7 +180,11 @@ public enum TransferArchive {
             schemaVersion: MochyDatabaseSchema.version,
             exportedAt: Date(),
             songs: try database.fetchAllSongs(),
+            artists: try database.fetchArtists(),
+            songArtistMaps: try database.fetchAllSongArtistMaps(),
+            albums: try database.fetchAlbums(),
             playlists: try database.fetchPlaylists(),
+            playlistSongMaps: try database.fetchAllPlaylistSongMaps(),
             songEdits: try database.fetchAllSongEdits(),
             transitions: try database.fetchAllTransitions(),
             speedDial: try database.fetchSpeedDialItems()
@@ -192,9 +200,19 @@ public enum TransferArchive {
         decoder.dateDecodingStrategy = .iso8601
         let payload = try decoder.decode(TransferArchivePayload.self, from: data)
         for song in payload.songs { try database.upsertSong(song) }
+        for artist in payload.artists ?? [] { try database.upsertArtist(artist) }
+        for map in payload.songArtistMaps ?? [] { try? database.upsertSongArtistMap(map) }
+        for album in payload.albums ?? [] { try database.upsertAlbum(album) }
         for playlist in payload.playlists { try database.upsertPlaylist(playlist) }
+        if let plMaps = payload.playlistSongMaps, !plMaps.isEmpty {
+            let grouped = Dictionary(grouping: plMaps, by: \.playlistId)
+            for (pid, rows) in grouped {
+                let orderedSongIds = rows.sorted { $0.position < $1.position }.map(\.songId)
+                try? database.replacePlaylistSongs(playlistId: pid, songIds: orderedSongIds)
+            }
+        }
         for edit in payload.songEdits { try database.upsertSongEdit(edit) }
-        for tr in payload.transitions { try database.upsertTransition(tr) }
+        for tr in payload.transitions { try? database.upsertTransition(tr) }
         for sd in payload.speedDial { try database.pinToSpeedDial(sd) }
         return payload.songs.count
     }

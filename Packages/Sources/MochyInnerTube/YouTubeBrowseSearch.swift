@@ -49,6 +49,34 @@ public struct YTHomeSection: Sendable, Equatable, Identifiable {
     }
 }
 
+public struct YTPlaylistSummary: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let title: String
+    public let thumbnailURL: String?
+    public let trackCountText: String?
+
+    public init(id: String, title: String, thumbnailURL: String? = nil, trackCountText: String? = nil) {
+        self.id = id
+        self.title = title
+        self.thumbnailURL = thumbnailURL
+        self.trackCountText = trackCountText
+    }
+}
+
+public struct YTBrowseCollection: Sendable, Equatable {
+    public let title: String
+    public let subtitle: String?
+    public let thumbnailURL: String?
+    public let tracks: [YTTrackItem]
+
+    public init(title: String, subtitle: String? = nil, thumbnailURL: String? = nil, tracks: [YTTrackItem]) {
+        self.title = title
+        self.subtitle = subtitle
+        self.thumbnailURL = thumbnailURL
+        self.tracks = tracks
+    }
+}
+
 public struct YTVideoStreamOption: Sendable, Equatable, Identifiable {
     public let itag: Int
     public let qualityLabel: String
@@ -56,7 +84,29 @@ public struct YTVideoStreamOption: Sendable, Equatable, Identifiable {
     public let height: Int
     public let url: URL
     public let mimeType: String
+    public let headers: [String: String]
+    public let isProgressive: Bool
     public var id: Int { itag }
+
+    public init(
+        itag: Int,
+        qualityLabel: String,
+        width: Int,
+        height: Int,
+        url: URL,
+        mimeType: String,
+        headers: [String: String] = [:],
+        isProgressive: Bool = false
+    ) {
+        self.itag = itag
+        self.qualityLabel = qualityLabel
+        self.width = width
+        self.height = height
+        self.url = url
+        self.mimeType = mimeType
+        self.headers = headers
+        self.isProgressive = isProgressive
+    }
 }
 
 // MARK: - Defensive YouTube Music JSON Navigation & Queries
@@ -91,18 +141,65 @@ extension InnerTubeClient {
         return InnerTubeParser.extractSuggestions(from: root)
     }
 
-    public func browseHome(browseId: String = "FEmusic_home") async throws -> [YTHomeSection] {
+    public func browseHome(browseId: String = "FEmusic_home", setLogin: Bool = false) async throws -> [YTHomeSection] {
         let client = YouTubeClient.metadataClient
         let visitor = await resolvedVisitorId(for: client)
+        let syncId = setLogin ? dataSyncId : nil
         let body = BrowseBody(
-            context: client.toContext(locale: locale, visitorData: visitor, dataSyncId: nil),
+            context: client.toContext(locale: locale, visitorData: visitor, dataSyncId: syncId),
             browseId: browseId,
             params: nil,
             continuation: nil
         )
-        let data = try await rawPost(endpoint: "browse", client: client, body: body)
+        let data = try await rawPost(endpoint: "browse", client: client, body: body, setLogin: setLogin)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
-        return InnerTubeParser.extractHomeSections(from: root)
+        let sections = InnerTubeParser.extractHomeSections(from: root)
+        if !sections.isEmpty {
+            return sections
+        }
+        let flat = InnerTubeParser.extractTracks(from: root)
+        return flat.isEmpty ? [] : [YTHomeSection(id: browseId, title: "Library", items: flat)]
+    }
+
+    public func browsePlaylist(playlistId: String, setLogin: Bool = false) async throws -> YTBrowseCollection {
+        let normalizedId = (playlistId.hasPrefix("VL") || playlistId.hasPrefix("FE") || playlistId.hasPrefix("MPRE") || playlistId.hasPrefix("UC"))
+            ? playlistId
+            : "VL\(playlistId)"
+        let client = YouTubeClient.metadataClient
+        let visitor = await resolvedVisitorId(for: client)
+        let syncId = setLogin ? dataSyncId : nil
+        let body = BrowseBody(
+            context: client.toContext(locale: locale, visitorData: visitor, dataSyncId: syncId),
+            browseId: normalizedId,
+            params: nil,
+            continuation: nil
+        )
+        let data = try await rawPost(endpoint: "browse", client: client, body: body, setLogin: setLogin)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return YTBrowseCollection(title: "YouTube Playlist", tracks: [])
+        }
+        let meta = InnerTubeParser.extractHeaderMetadata(from: root)
+        let tracks = InnerTubeParser.extractTracks(from: root)
+        return YTBrowseCollection(
+            title: meta.title ?? "YouTube Playlist",
+            subtitle: meta.subtitle,
+            thumbnailURL: meta.thumbnailURL ?? tracks.first?.thumbnailURL,
+            tracks: tracks
+        )
+    }
+
+    public func browseLibraryPlaylists() async throws -> [YTPlaylistSummary] {
+        let client = YouTubeClient.metadataClient
+        let visitor = await resolvedVisitorId(for: client)
+        let body = BrowseBody(
+            context: client.toContext(locale: locale, visitorData: visitor, dataSyncId: dataSyncId),
+            browseId: "FEmusic_liked_playlists",
+            params: nil,
+            continuation: nil
+        )
+        let data = try await rawPost(endpoint: "browse", client: client, body: body, setLogin: true)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        return InnerTubeParser.extractPlaylists(from: root)
     }
 
     public func nextQueue(videoId: String, playlistId: String? = nil) async throws -> [YTTrackItem] {
@@ -124,46 +221,117 @@ extension InnerTubeClient {
 }
 
 extension YTPlayerResolver {
-    /// Resolves progressive/adaptive video streams (144p–2160p) for the `VIDEO` player style.
+    /// Resolves progressive & adaptive MP4 video streams (360p–2160p) with EJS deobfuscation and required headers.
     public func resolveVideoStreams(videoId: String) async throws -> [YTVideoStreamOption] {
-        for client in [YouTubeClient.visionOS, YouTubeClient.iPadOS, YouTubeClient.androidVR16148] {
-            guard let response = try? await player(client: client, videoId: videoId),
+        let cookie = await innerTube.cookie
+        for client in [YouTubeClient.visionOS, YouTubeClient.iPadOS, YouTubeClient.mobile, YouTubeClient.webRemix] {
+            guard let response = try? await resolveRawPlayer(client: client, videoId: videoId),
                   response.playabilityStatus.status == "OK",
                   let streamingData = response.streamingData else {
                 continue
             }
-            let combined = (streamingData.formats ?? []) + streamingData.adaptiveFormats
-            let videoFormats = combined.compactMap { fmt -> YTVideoStreamOption? in
+            let headers = Self.streamHeaders(for: client, cookie: client.loginSupported ? cookie : nil)
+            var options: [YTVideoStreamOption] = []
+
+            for fmt in streamingData.formats ?? [] {
                 guard let height = fmt.height, let width = fmt.width,
-                      let rawURL = fmt.url, let url = URL(string: rawURL),
-                      fmt.mimeType.lowercased().contains("mp4") else {
-                    return nil
+                      fmt.mimeType.lowercased().contains("mp4"),
+                      let resolvedStr = try? await resolveFormatURL(format: fmt),
+                      let url = URL(string: resolvedStr) else {
+                    continue
                 }
-                return YTVideoStreamOption(
-                    itag: fmt.itag,
-                    qualityLabel: fmt.qualityLabel ?? "\(height)p",
-                    width: width,
-                    height: height,
-                    url: url,
-                    mimeType: fmt.mimeType
+                options.append(
+                    YTVideoStreamOption(
+                        itag: fmt.itag,
+                        qualityLabel: fmt.qualityLabel ?? "\(height)p",
+                        width: width,
+                        height: height,
+                        url: url,
+                        mimeType: fmt.mimeType,
+                        headers: headers,
+                        isProgressive: true
+                    )
                 )
             }
-            if !videoFormats.isEmpty {
-                return videoFormats.sorted { $0.height > $1.height }
+
+            for fmt in streamingData.adaptiveFormats {
+                guard let height = fmt.height, let width = fmt.width,
+                      fmt.mimeType.lowercased().contains("video/mp4"),
+                      let resolvedStr = try? await resolveFormatURL(format: fmt),
+                      let url = URL(string: resolvedStr) else {
+                    continue
+                }
+                options.append(
+                    YTVideoStreamOption(
+                        itag: fmt.itag,
+                        qualityLabel: fmt.qualityLabel ?? "\(height)p",
+                        width: width,
+                        height: height,
+                        url: url,
+                        mimeType: fmt.mimeType,
+                        headers: headers,
+                        isProgressive: false
+                    )
+                )
+            }
+
+            if !options.isEmpty {
+                // Prefer progressive muxed MP4 first for guaranteed iOS playback, then higher resolution MP4.
+                return options.sorted { lhs, rhs in
+                    if lhs.isProgressive != rhs.isProgressive { return lhs.isProgressive }
+                    return lhs.height > rhs.height
+                }
             }
         }
         return []
-    }
-
-    private func player(client: YouTubeClient, videoId: String) async throws -> PlayerResponse {
-        // Delegates internally to the actor's innerTube client via existing public player API.
-        try await resolveRawPlayer(client: client, videoId: videoId)
     }
 }
 
 // MARK: - Recursive Renderer Parsers
 
 public enum InnerTubeParser {
+    public static func extractHeaderMetadata(from root: Any) -> (title: String?, subtitle: String?, thumbnailURL: String?) {
+        var title: String?
+        var subtitle: String?
+        var thumb: String?
+        walkDictionaries(root) { dict in
+            let header = (dict["musicResponsiveHeaderRenderer"] as? [String: Any])
+                ?? (dict["musicDetailHeaderRenderer"] as? [String: Any])
+                ?? (dict["musicImmersiveHeaderRenderer"] as? [String: Any])
+            guard let header else { return }
+            if title == nil {
+                title = (header["title"] as? [String: Any]).flatMap { runsText($0) }
+            }
+            if subtitle == nil {
+                subtitle = (header["subtitle"] as? [String: Any]).flatMap { runsText($0) }
+            }
+            if thumb == nil {
+                thumb = ((((header["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            }
+        }
+        return (title, subtitle, thumb)
+    }
+
+    public static func extractPlaylists(from root: Any) -> [YTPlaylistSummary] {
+        var out: [YTPlaylistSummary] = []
+        var seen = Set<String>()
+        walkDictionaries(root) { dict in
+            guard let twoRow = dict["musicTwoRowItemRenderer"] as? [String: Any],
+                  let nav = twoRow["navigationEndpoint"] as? [String: Any],
+                  let browse = nav["browseEndpoint"] as? [String: Any],
+                  let browseId = browse["browseId"] as? String,
+                  browseId.hasPrefix("VL") || browseId.hasPrefix("PL") else {
+                return
+            }
+            guard seen.insert(browseId).inserted else { return }
+            let title = (twoRow["title"] as? [String: Any]).flatMap { runsText($0) } ?? "Playlist"
+            let sub = (twoRow["subtitle"] as? [String: Any]).flatMap { runsText($0) }
+            let thumb = ((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            out.append(YTPlaylistSummary(id: browseId, title: title, thumbnailURL: thumb, trackCountText: sub))
+        }
+        return out
+    }
+
     public static func extractSuggestions(from root: Any) -> [String] {
         var results: [String] = []
         walkDictionaries(root) { dict in
@@ -234,6 +402,12 @@ public enum InnerTubeParser {
             let parts = subtitle.components(separatedBy: " • ")
             let artists = splitArtists(parts.first ?? "")
             let duration = parts.last.flatMap { parseDurationSeconds($0) }
+                ?? (responsive["fixedColumns"] as? [[String: Any]])
+                    .flatMap { fixed -> Int? in
+                        guard let first = fixed.first?["musicResponsiveListItemFixedColumnRenderer"] as? [String: Any],
+                              let txt = first["text"] as? [String: Any] else { return nil }
+                        return parseDurationSeconds(runsText(txt))
+                    }
             let thumbs = ((((responsive["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
             return YTTrackItem(
                 id: videoId,

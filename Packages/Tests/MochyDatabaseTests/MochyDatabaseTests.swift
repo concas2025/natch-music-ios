@@ -84,4 +84,29 @@ final class MochyDatabaseTests: XCTestCase {
         XCTAssertFalse(items.contains { $0.id == "sd-1" })
         XCTAssertEqual(items.first?.id, "sd-25")
     }
+
+    func testLyricsOffsetRecapTelemetryAndSyncUndoSnapshot() throws {
+        let db = try MochyDatabase.inMemory()
+        try db.upsertSong(
+            SongEntity(id: "s1", title: "Track One", duration: 200, liked: true),
+            artists: [ArtistEntity(id: "a1", name: "Artist Alpha")]
+        )
+        try db.updateLyricsOffset(songId: "s1", offsetMs: -350)
+        XCTAssertEqual(try db.fetchSong(id: "s1")?.lyricsOffset, -350)
+
+        try db.recordPlayEvent(songId: "s1", playTimeMs: 120_000)
+        let weekdays = try db.fetchWeekdayPlayTimeMs()
+        XCTAssertEqual(weekdays.count, 7)
+        XCTAssertEqual(weekdays.reduce(0, +), 120_000)
+
+        let topArtists = try db.fetchTopArtists(limit: 5)
+        XCTAssertEqual(topArtists.first?.artist.name, "Artist Alpha")
+        XCTAssertEqual(topArtists.first?.playTimeMs, 120_000)
+
+        try db.upsertPlaylist(PlaylistEntity(id: "pl_keep", name: "Keep"))
+        try db.upsertPlaylist(PlaylistEntity(id: "pl_drop", name: "Drop"))
+        try db.restoreSyncSnapshot(keepPlaylistIds: ["pl_keep"], likedSongIds: [])
+        XCTAssertEqual(try db.fetchPlaylists().map(\.id), ["pl_keep"])
+        XCTAssertEqual(try db.fetchSong(id: "s1")?.liked, false)
+    }
 }

@@ -34,15 +34,34 @@ public actor InnerTubeClient {
         cookie: String? = nil,
         visitorData: String? = nil,
         dataSyncId: String? = nil,
-        session: URLSession = .shared
+        session: URLSession? = nil
     ) {
         self.locale = locale
         self.cookie = cookie
         self.visitorData = visitorData
         self.dataSyncId = dataSyncId
-        self.session = session
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.default
+            cfg.timeoutIntervalForRequest = 8
+            cfg.timeoutIntervalForResource = 16
+            self.session = URLSession(configuration: cfg)
+        }
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
+    }
+
+    /// Ensures a valid guest `visitorData` exists for web InnerTube & BotGuard PoToken minting.
+    public func ensureGuestVisitorData() async -> String? {
+        if let visitorData, !visitorData.isEmpty {
+            return visitorData
+        }
+        if let minted = try? await mintVisitorId(for: .webRemix), !minted.isEmpty {
+            self.visitorData = minted
+            return minted
+        }
+        return nil
     }
 
     public func updateAuth(cookie: String?, visitorData: String?, dataSyncId: String?) {

@@ -146,7 +146,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MochyLyricsTests",
-            dependencies: ["MochyLyrics", "MochyCore", "MochyInnerTube"],
+            dependencies: ["MochyLyrics", "MochyCore", "MochyInnerTube", "MochyDatabase"],
             path: "Tests/MochyLyricsTests"
         ),
         .testTarget(

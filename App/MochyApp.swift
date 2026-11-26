@@ -24,7 +24,11 @@ struct MochyApp: App {
             database = try! MochyDatabase.inMemory()
         }
         let settings = AppSettings()
-        _coordinator = State(initialValue: AppCoordinator(settings: settings, database: database))
+        let coord = AppCoordinator(settings: settings, database: database)
+        coord.onLiveActivityUpdate = { snapshot in
+            LiveActivityCoordinator.shared.update(snapshot: snapshot)
+        }
+        _coordinator = State(initialValue: coord)
     }
 
     var body: some Scene {

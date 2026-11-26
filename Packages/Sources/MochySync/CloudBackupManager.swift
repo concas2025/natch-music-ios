@@ -1,9 +1,9 @@
 import Foundation
 import MochyDatabase
 
-/// Manages local Transfer Archive backups, iCloud Drive ubiquity sync, and WebDAV uploads.
+/// Manages portable Transfer Archive backups (Files/iCloud Drive via document picker + Ubiquity + WebDAV).
 public actor CloudBackupManager {
-    public static let backgroundTaskIdentifier = "com.mochyy.mochymusic.backup"
+    public static let backgroundTaskIdentifier = "com.natch.music.ios.backup"
     private let database: MochyDatabase
     private let session: URLSession
 
@@ -12,7 +12,19 @@ public actor CloudBackupManager {
         self.session = session
     }
 
-    public func saveToICloudDrive(filename: String = "mochy_backup.json") throws -> URL? {
+    public func exportArchiveData() throws -> Data {
+        try TransferArchive.exportJSON(from: database)
+    }
+
+    public func importArchiveData(_ data: Data) throws -> Int {
+        try TransferArchive.importJSON(data, into: database)
+    }
+
+    public func isICloudContainerAvailable() -> Bool {
+        FileManager.default.url(forUbiquityContainerIdentifier: nil) != nil
+    }
+
+    public func saveToICloudDrive(filename: String = "natch_backup.json") throws -> URL? {
         guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
             return nil
         }
@@ -26,7 +38,7 @@ public actor CloudBackupManager {
 
     public func uploadWebDAV(endpoint: URL, username: String, password: String) async throws -> Bool {
         let payload = try TransferArchive.exportJSON(from: database)
-        var req = URLRequest(url: endpoint.appendingPathComponent("mochy_backup.json"))
+        var req = URLRequest(url: endpoint.appendingPathComponent("natch_backup.json"))
         req.httpMethod = "PUT"
         req.httpBody = payload
         let creds = Data("\(username):\(password)".utf8).base64EncodedString()

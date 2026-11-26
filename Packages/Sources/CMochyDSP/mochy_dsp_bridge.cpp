@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -18,6 +21,10 @@ constexpr std::array<double, 10> kEqFreqs = {
 struct StereoBiquad {
     double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
     double z1L = 0, z2L = 0, z1R = 0, z2R = 0;
+
+    void resetState() {
+        z1L = z2L = z1R = z2R = 0.0;
+    }
 
     void setPeaking(double fs, double f0, double q, double gainDb) {
         if (std::abs(gainDb) < 0.05) {
@@ -75,9 +82,109 @@ struct StereoBiquad {
     }
 };
 
+struct MochyStageWrapper {
+    static constexpr int kChunkFrames = 1024;
+
+    std::unique_ptr<stage::Engine> engine;
+    std::mutex stageMutex;
+    std::array<float, MOCHY_STAGE_PARAM_COUNT> stagedParams{};
+    int stagedParamCount = 0;
+    std::atomic<bool> paramsDirty{false};
+    std::atomic<bool> clearRequested{false};
+    std::array<std::atomic<float>, MOCHY_STAGE_LEVEL_COUNT> cachedLevels{};
+
+    // Pre-allocated chunk conversion buffers (zero stack bloat & zero heap alloc on audio thread).
+    std::array<int16_t, kChunkFrames * 2> inInterleaved{};
+    std::array<int16_t, kChunkFrames * 2> outInterleaved{};
+
+    MochyStageWrapper(int sampleRate, int channels)
+        : engine(std::make_unique<stage::Engine>(sampleRate, channels)) {
+        for (auto& lvl : cachedLevels) {
+            lvl.store(0.0f, std::memory_order_relaxed);
+        }
+    }
+
+    void enqueueParams(const float* params, int count) {
+        int clamped = std::min(count, static_cast<int>(MOCHY_STAGE_PARAM_COUNT));
+        {
+            std::lock_guard<std::mutex> lock(stageMutex);
+            std::memcpy(stagedParams.data(), params, static_cast<size_t>(clamped) * sizeof(float));
+            stagedParamCount = clamped;
+        }
+        paramsDirty.store(true, std::memory_order_release);
+    }
+
+    void requestClear() {
+        clearRequested.store(true, std::memory_order_release);
+    }
+
+    bool processF32(float* left, float* right, int frames) {
+        if (!engine || !left || !right || frames <= 0) return true;
+
+        if (clearRequested.exchange(false, std::memory_order_acquire)) {
+            engine->clear();
+        }
+
+        if (paramsDirty.exchange(false, std::memory_order_acquire)) {
+            std::unique_lock<std::mutex> lock(stageMutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                std::array<float, MOCHY_STAGE_PARAM_COUNT> localCopy = stagedParams;
+                int count = stagedParamCount;
+                lock.unlock();
+                if (count > 0) {
+                    engine->setParams(localCopy.data(), count);
+                }
+            } else {
+                // Retry on next audio render quantum without blocking the realtime thread.
+                paramsDirty.store(true, std::memory_order_release);
+            }
+        }
+
+        bool allDry = true;
+        int offset = 0;
+        while (offset < frames) {
+            int n = std::min(kChunkFrames, frames - offset);
+            for (int i = 0; i < n; ++i) {
+                float l = std::clamp(left[offset + i], -1.0f, 1.0f);
+                float r = std::clamp(right[offset + i], -1.0f, 1.0f);
+                inInterleaved[static_cast<size_t>(i * 2)] = static_cast<int16_t>(l * 32767.0f);
+                inInterleaved[static_cast<size_t>(i * 2 + 1)] = static_cast<int16_t>(r * 32767.0f);
+            }
+
+            bool dryPass = engine->process(inInterleaved.data(), outInterleaved.data(), n);
+            if (!dryPass) {
+                allDry = false;
+                for (int i = 0; i < n; ++i) {
+                    left[offset + i] = static_cast<float>(outInterleaved[static_cast<size_t>(i * 2)]) / 32768.0f;
+                    right[offset + i] = static_cast<float>(outInterleaved[static_cast<size_t>(i * 2 + 1)]) / 32768.0f;
+                }
+            }
+            offset += n;
+        }
+
+        float rawLevels[MOCHY_STAGE_LEVEL_COUNT] = {};
+        engine->levels(rawLevels);
+        for (int i = 0; i < MOCHY_STAGE_LEVEL_COUNT; ++i) {
+            cachedLevels[static_cast<size_t>(i)].store(rawLevels[i], std::memory_order_relaxed);
+        }
+        return allDry;
+    }
+
+    void readLevels(float* out) const {
+        for (int i = 0; i < MOCHY_STAGE_LEVEL_COUNT; ++i) {
+            out[i] = cachedLevels[static_cast<size_t>(i)].load(std::memory_order_relaxed);
+        }
+    }
+};
+
 struct MochyFxProcessor {
     double fs;
     MochyFxParams params{};
+    MochyFxParams stagedParams{};
+    std::mutex stageMutex;
+    std::atomic<bool> paramsDirty{false};
+    std::atomic<bool> resetRequested{false};
+
     std::array<StereoBiquad, 10> eqBands{};
     StereoBiquad bassShelf{};
     StereoBiquad trebleShelf{};
@@ -89,13 +196,19 @@ struct MochyFxProcessor {
     std::vector<float> echoBufR;
     size_t echoPos = 0;
 
+    std::vector<float> flangerBufL;
+    std::vector<float> flangerBufR;
+    size_t flangerPos = 0;
+    double flangerPhase = 0.0;
+
     std::array<float, 2048> reverbL{};
     std::array<float, 2048> reverbR{};
     size_t reverbPos = 0;
 
     double orbitPhase = 0.0;
     double lufsEma = 0.0;
-    float peakAbs = 0.0f;
+    std::atomic<float> atomicLufs{-70.0f};
+    std::atomic<bool> atomicSilent{true};
     float crushHoldL = 0.0f;
     float crushHoldR = 0.0f;
     int crushCounter = 0;
@@ -103,12 +216,48 @@ struct MochyFxProcessor {
     explicit MochyFxProcessor(double sampleRate)
         : fs(std::max(8000.0, sampleRate)),
           echoBufL(static_cast<size_t>(fs * 2.0), 0.0f),
-          echoBufR(static_cast<size_t>(fs * 2.0), 0.0f) {
+          echoBufR(static_cast<size_t>(fs * 2.0), 0.0f),
+          flangerBufL(std::max<size_t>(64, static_cast<size_t>(fs * 0.03)), 0.0f),
+          flangerBufR(std::max<size_t>(64, static_cast<size_t>(fs * 0.03)), 0.0f) {
         params.enabled = true;
         params.crossmix_gain = 1.0f;
         params.high_cut_hz = 20000.0f;
         params.limiter_enabled = true;
+        stagedParams = params;
         rebuildFilters();
+    }
+
+    void enqueueParams(const MochyFxParams& next) {
+        {
+            std::lock_guard<std::mutex> lock(stageMutex);
+            stagedParams = next;
+        }
+        paramsDirty.store(true, std::memory_order_release);
+    }
+
+    void requestReset() {
+        resetRequested.store(true, std::memory_order_release);
+    }
+
+    void clearStates() {
+        for (auto& b : eqBands) b.resetState();
+        bassShelf.resetState();
+        trebleShelf.resetState();
+        hpf.resetState();
+        lpf.resetState();
+        bassCutLpf.resetState();
+        std::fill(echoBufL.begin(), echoBufL.end(), 0.0f);
+        std::fill(echoBufR.begin(), echoBufR.end(), 0.0f);
+        std::fill(flangerBufL.begin(), flangerBufL.end(), 0.0f);
+        std::fill(flangerBufR.begin(), flangerBufR.end(), 0.0f);
+        reverbL.fill(0.0f);
+        reverbR.fill(0.0f);
+        echoPos = 0;
+        flangerPos = 0;
+        reverbPos = 0;
+        lufsEma = 0.0;
+        atomicLufs.store(-70.0f, std::memory_order_relaxed);
+        atomicSilent.store(true, std::memory_order_relaxed);
     }
 
     void rebuildFilters() {
@@ -126,13 +275,32 @@ struct MochyFxProcessor {
         bassCutLpf.setLowPass(fs, 190.0);
     }
 
+    void applyPendingOnAudioThread() {
+        if (resetRequested.exchange(false, std::memory_order_acquire)) {
+            clearStates();
+        }
+        if (paramsDirty.exchange(false, std::memory_order_acquire)) {
+            std::unique_lock<std::mutex> lock(stageMutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                params = stagedParams;
+                lock.unlock();
+                rebuildFilters();
+            } else {
+                paramsDirty.store(true, std::memory_order_release);
+            }
+        }
+    }
+
     void process(float* left, float* right, int frames) {
         if (!left || !right || frames <= 0) return;
+
+        applyPendingOnAudioThread();
 
         double replayLinear = std::pow(10.0, params.replay_gain_db / 20.0);
         double deckGain = std::max(0.0f, params.crossmix_gain);
         bool useHpf = params.low_cut_hz > 25.0f;
         bool useLpf = params.high_cut_hz > 40.0f && params.high_cut_hz < 19500.0f;
+        bool useFlanger = params.flanger_mix > 0.005f;
 
         size_t delaySamples = std::clamp(
             static_cast<size_t>((params.echo_delay_ms / 1000.0) * fs),
@@ -197,6 +365,34 @@ struct MochyFxProcessor {
                     r = r * (1.0f - params.warmth) + std::tanh(r * drive) * params.warmth;
                 }
 
+                // Modulated Stereo Flanger (used by Crossmix `.phaserGlide` and FX)
+                if (useFlanger) {
+                    flangerPhase += (2.0 * kPi * 0.35) / fs;
+                    if (flangerPhase > 2.0 * kPi) flangerPhase -= 2.0 * kPi;
+                    double modL = 0.0015 + 0.0050 * (0.5 + 0.5 * std::sin(flangerPhase));
+                    double modR = 0.0015 + 0.0050 * (0.5 + 0.5 * std::cos(flangerPhase));
+                    size_t bufSize = flangerBufL.size();
+
+                    auto readInterp = [bufSize](const std::vector<float>& buf, size_t writePos, double delaySmp) -> float {
+                        double clamped = std::clamp(delaySmp, 1.0, static_cast<double>(bufSize - 2));
+                        size_t d0 = static_cast<size_t>(clamped);
+                        float frac = static_cast<float>(clamped - static_cast<double>(d0));
+                        size_t idx0 = (writePos + bufSize - d0) % bufSize;
+                        size_t idx1 = (idx0 + bufSize - 1) % bufSize;
+                        return buf[idx0] * (1.0f - frac) + buf[idx1] * frac;
+                    };
+
+                    float fWetL = readInterp(flangerBufL, flangerPos, modL * fs);
+                    float fWetR = readInterp(flangerBufR, flangerPos, modR * fs);
+                    flangerBufL[flangerPos] = l + fWetL * 0.35f;
+                    flangerBufR[flangerPos] = r + fWetR * 0.35f;
+                    flangerPos = (flangerPos + 1) % bufSize;
+
+                    float mix = std::clamp(params.flanger_mix, 0.0f, 1.0f);
+                    l = l * (1.0f - mix * 0.45f) + fWetL * mix * 0.65f;
+                    r = r * (1.0f - mix * 0.45f) + fWetR * mix * 0.65f;
+                }
+
                 // Ping-pong delay send
                 size_t readPos = (echoPos + echoBufL.size() - delaySamples) % echoBufL.size();
                 float wetL = echoBufR[readPos];
@@ -242,6 +438,10 @@ struct MochyFxProcessor {
                 r = std::tanh(r);
             }
 
+            // Guard against NaN/Inf propagation on malformed input buffers.
+            if (!std::isfinite(l)) l = 0.0f;
+            if (!std::isfinite(r)) r = 0.0f;
+
             left[i] = l;
             right[i] = r;
 
@@ -252,7 +452,9 @@ struct MochyFxProcessor {
 
         double meanSq = blockEnergy / frames;
         lufsEma = lufsEma * 0.85 + meanSq * 0.15;
-        peakAbs = maxSample;
+        float computedLufs = (lufsEma <= 1e-9) ? -70.0f : static_cast<float>(10.0 * std::log10(lufsEma) - 0.691);
+        atomicLufs.store(computedLufs, std::memory_order_relaxed);
+        atomicSilent.store(maxSample < 1e-4f, std::memory_order_relaxed);
     }
 };
 
@@ -266,50 +468,31 @@ bool mochy_stage_load_hrtf(const uint8_t* data, size_t size) {
 }
 
 void* mochy_stage_create(int sample_rate, int channels) {
-    return new stage::Engine(sample_rate, channels);
+    return new MochyStageWrapper(sample_rate, channels);
 }
 
 void mochy_stage_destroy(void* engine) {
-    delete static_cast<stage::Engine*>(engine);
+    delete static_cast<MochyStageWrapper*>(engine);
 }
 
 void mochy_stage_set_params(void* engine, const float* params, int count) {
     if (!engine || !params || count <= 0) return;
-    static_cast<stage::Engine*>(engine)->setParams(params, count);
+    static_cast<MochyStageWrapper*>(engine)->enqueueParams(params, count);
 }
 
 void mochy_stage_clear(void* engine) {
     if (!engine) return;
-    static_cast<stage::Engine*>(engine)->clear();
+    static_cast<MochyStageWrapper*>(engine)->requestClear();
 }
 
 bool mochy_stage_process_f32(void* engine, float* left, float* right, int frames) {
     if (!engine || !left || !right || frames <= 0) return true;
-    constexpr int kMaxStackFrames = 4096;
-    if (frames > kMaxStackFrames) return true;
-
-    int16_t interleaved[kMaxStackFrames * 2];
-    for (int i = 0; i < frames; ++i) {
-        float l = std::clamp(left[i], -1.0f, 1.0f);
-        float r = std::clamp(right[i], -1.0f, 1.0f);
-        interleaved[i * 2] = static_cast<int16_t>(l * 32767.0f);
-        interleaved[i * 2 + 1] = static_cast<int16_t>(r * 32767.0f);
-    }
-
-    int16_t outInterleaved[kMaxStackFrames * 2];
-    bool dryPass = static_cast<stage::Engine*>(engine)->process(interleaved, outInterleaved, frames);
-    if (!dryPass) {
-        for (int i = 0; i < frames; ++i) {
-            left[i] = static_cast<float>(outInterleaved[i * 2]) / 32768.0f;
-            right[i] = static_cast<float>(outInterleaved[i * 2 + 1]) / 32768.0f;
-        }
-    }
-    return dryPass;
+    return static_cast<MochyStageWrapper*>(engine)->processF32(left, right, frames);
 }
 
 void mochy_stage_levels(void* engine, float* out_levels_6) {
     if (!engine || !out_levels_6) return;
-    static_cast<stage::Engine*>(engine)->levels(out_levels_6);
+    static_cast<MochyStageWrapper*>(engine)->readLevels(out_levels_6);
 }
 
 void* mochy_fx_create(double sample_rate) {
@@ -322,9 +505,12 @@ void mochy_fx_destroy(void* fx) {
 
 void mochy_fx_update(void* fx, const MochyFxParams* params) {
     if (!fx || !params) return;
-    auto* proc = static_cast<MochyFxProcessor*>(fx);
-    proc->params = *params;
-    proc->rebuildFilters();
+    static_cast<MochyFxProcessor*>(fx)->enqueueParams(*params);
+}
+
+void mochy_fx_reset(void* fx) {
+    if (!fx) return;
+    static_cast<MochyFxProcessor*>(fx)->requestReset();
 }
 
 void mochy_fx_process(void* fx, float* left, float* right, int frames) {
@@ -334,14 +520,12 @@ void mochy_fx_process(void* fx, float* left, float* right, int frames) {
 
 float mochy_fx_get_lufs(void* fx) {
     if (!fx) return -70.0f;
-    double ema = static_cast<MochyFxProcessor*>(fx)->lufsEma;
-    if (ema <= 1e-9) return -70.0f;
-    return static_cast<float>(10.0 * std::log10(ema) - 0.691);
+    return static_cast<MochyFxProcessor*>(fx)->atomicLufs.load(std::memory_order_relaxed);
 }
 
 bool mochy_fx_is_silent(void* fx) {
     if (!fx) return true;
-    return static_cast<MochyFxProcessor*>(fx)->peakAbs < 1e-4f;
+    return static_cast<MochyFxProcessor*>(fx)->atomicSilent.load(std::memory_order_relaxed);
 }
 
 } // extern "C"

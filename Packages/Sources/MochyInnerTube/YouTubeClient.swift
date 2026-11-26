@@ -16,6 +16,7 @@ public struct YouTubeClient: Sendable, Equatable {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
     public static let originYouTube = "https://www.youtube.com"
     public static let originYouTubeMusic = "https://music.youtube.com"
+    public static let originYouTubeStudio = "https://studio.youtube.com"
 
     public let clientName: String
     public let clientVersion: String
@@ -152,7 +153,8 @@ public struct YouTubeClient: Sendable, Equatable {
         userAgent: userAgentWeb,
         loginSupported: true,
         loginRequired: true,
-        useSignatureTimestamp: true
+        useSignatureTimestamp: true,
+        apiOrigin: originYouTubeStudio
     )
 
     public static let tvHTML5 = YouTubeClient(

@@ -44,14 +44,15 @@ targets:
       properties:
         CFBundleDisplayName: Natch Music
         CFBundleName: Natch Music
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         UIUserInterfaceStyle: Dark
         UIBackgroundModes:
           - audio
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        NSSupportsLiveActivities: true
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         NSMicrophoneUsageDescription: "Natch Music uses the microphone to identify songs playing nearby via ShazamKit."

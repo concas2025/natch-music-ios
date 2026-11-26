@@ -209,6 +209,16 @@ public enum PreferenceKeys {
     public static let dataSyncId = "dataSyncId"
     public static let countryCode = "countryCode"
     public static let languageCode = "languageCode"
+    public static let infiniteQueueEnabled = "infiniteQueueEnabled"
+    public static let loudnessNormalizationEnabled = "loudnessNormalizationEnabled"
+    public static let lyricsTranslationLanguage = "lyricsTranslationLanguage"
+    public static let hasCompletedOnboarding = "hasCompletedOnboarding"
+    public static let profileUsername = "profileUsername"
+    public static let profileCardNumber = "profileCardNumber"
+    public static let profileJoinedTimestamp = "profileJoinedTimestamp"
+    public static let profileAvatarPath = "profileAvatarPath"
+    public static let customMonochromeServers = "customMonochromeServers"
+    public static let webModuleURLs = "webModuleURLs"
 }
 
 // MARK: - Observable Settings Store
@@ -323,6 +333,36 @@ public final class AppSettings {
     public var ytExcludeImports: Bool {
         didSet { defaults.set(ytExcludeImports, forKey: PreferenceKeys.ytExcludeImports) }
     }
+    public var infiniteQueueEnabled: Bool {
+        didSet { defaults.set(infiniteQueueEnabled, forKey: PreferenceKeys.infiniteQueueEnabled) }
+    }
+    public var loudnessNormalizationEnabled: Bool {
+        didSet { defaults.set(loudnessNormalizationEnabled, forKey: PreferenceKeys.loudnessNormalizationEnabled) }
+    }
+    public var lyricsTranslationLanguage: String {
+        didSet { defaults.set(lyricsTranslationLanguage, forKey: PreferenceKeys.lyricsTranslationLanguage) }
+    }
+    public var hasCompletedOnboarding: Bool {
+        didSet { defaults.set(hasCompletedOnboarding, forKey: PreferenceKeys.hasCompletedOnboarding) }
+    }
+    public var profileUsername: String {
+        didSet { defaults.set(profileUsername, forKey: PreferenceKeys.profileUsername) }
+    }
+    public var profileCardNumber: String {
+        didSet { defaults.set(profileCardNumber, forKey: PreferenceKeys.profileCardNumber) }
+    }
+    public var profileJoinedTimestamp: TimeInterval {
+        didSet { defaults.set(profileJoinedTimestamp, forKey: PreferenceKeys.profileJoinedTimestamp) }
+    }
+    public var profileAvatarPath: String? {
+        didSet { defaults.set(profileAvatarPath, forKey: PreferenceKeys.profileAvatarPath) }
+    }
+    public var customMonochromeServers: [String] {
+        didSet { defaults.set(customMonochromeServers, forKey: PreferenceKeys.customMonochromeServers) }
+    }
+    public var webModuleURLs: [String] {
+        didSet { defaults.set(webModuleURLs, forKey: PreferenceKeys.webModuleURLs) }
+    }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -365,6 +405,29 @@ public final class AppSettings {
         self.canvasOrder = defaults.stringArray(forKey: PreferenceKeys.canvasOrder)
             ?? ["appleMusic", "monochrome", "spotify", "artistVideo"]
         self.ytExcludeImports = Self.decodeBool(defaults, key: PreferenceKeys.ytExcludeImports, default: true)
+        self.infiniteQueueEnabled = Self.decodeBool(defaults, key: PreferenceKeys.infiniteQueueEnabled, default: true)
+        self.loudnessNormalizationEnabled = Self.decodeBool(defaults, key: PreferenceKeys.loudnessNormalizationEnabled, default: true)
+        self.lyricsTranslationLanguage = defaults.string(forKey: PreferenceKeys.lyricsTranslationLanguage) ?? "vi"
+        self.hasCompletedOnboarding = defaults.bool(forKey: PreferenceKeys.hasCompletedOnboarding)
+        self.profileUsername = defaults.string(forKey: PreferenceKeys.profileUsername) ?? ""
+        if let existingCard = defaults.string(forKey: PreferenceKeys.profileCardNumber), !existingCard.isEmpty {
+            self.profileCardNumber = existingCard
+        } else {
+            let generated = String(format: "%04d%04d", Int.random(in: 1000...9999), Int.random(in: 1000...9999))
+            defaults.set(generated, forKey: PreferenceKeys.profileCardNumber)
+            self.profileCardNumber = generated
+        }
+        let savedJoined = defaults.double(forKey: PreferenceKeys.profileJoinedTimestamp)
+        if savedJoined > 0 {
+            self.profileJoinedTimestamp = savedJoined
+        } else {
+            let now = Date().timeIntervalSince1970
+            defaults.set(now, forKey: PreferenceKeys.profileJoinedTimestamp)
+            self.profileJoinedTimestamp = now
+        }
+        self.profileAvatarPath = defaults.string(forKey: PreferenceKeys.profileAvatarPath)
+        self.customMonochromeServers = defaults.stringArray(forKey: PreferenceKeys.customMonochromeServers) ?? []
+        self.webModuleURLs = defaults.stringArray(forKey: PreferenceKeys.webModuleURLs) ?? []
     }
 
     private static func decodeEnum<T: RawRepresentable>(

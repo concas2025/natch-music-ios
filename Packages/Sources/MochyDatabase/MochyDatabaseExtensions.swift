@@ -298,4 +298,109 @@ extension MochyDatabase {
             return Set(ids)
         }
     }
+
+    public func updateLyricsOffset(songId: String, offsetMs: Int) throws {
+        try dbWriter.write { db in
+            try db.execute(
+                sql: "UPDATE song SET lyricsOffset = ? WHERE id = ?",
+                arguments: [offsetMs, songId]
+            )
+        }
+    }
+
+    public func deletePlaylist(id: String) throws {
+        try dbWriter.write { db in
+            try PlaylistEntity.deleteOne(db, key: id)
+        }
+    }
+
+    public func replacePlaylistSongs(playlistId: String, songIds: [String]) throws {
+        try dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM playlist_song_map WHERE playlistId = ?", arguments: [playlistId])
+            for (idx, songId) in songIds.enumerated() {
+                var entry = PlaylistSongMap(playlistId: playlistId, songId: songId, position: idx)
+                try entry.insert(db)
+            }
+        }
+    }
+
+    public func fetchAllSongArtistMaps() throws -> [SongArtistMap] {
+        try dbWriter.read { db in
+            try SongArtistMap.fetchAll(db)
+        }
+    }
+
+    public func fetchAllPlaylistSongMaps() throws -> [PlaylistSongMap] {
+        try dbWriter.read { db in
+            try PlaylistSongMap.order(Column("playlistId"), Column("position")).fetchAll(db)
+        }
+    }
+
+    public func upsertArtist(_ artist: ArtistEntity) throws {
+        try dbWriter.write { db in
+            try artist.save(db)
+        }
+    }
+
+    public func upsertSongArtistMap(_ map: SongArtistMap) throws {
+        try dbWriter.write { db in
+            try map.save(db)
+        }
+    }
+
+    /// Returns total listening milliseconds grouped by weekday (Monday = 0 .. Sunday = 6) for Recap Story charts.
+    public func fetchWeekdayPlayTimeMs() throws -> [Int64] {
+        let events = try dbWriter.read { db in
+            try EventEntity.fetchAll(db)
+        }
+        var totals = [Int64](repeating: 0, count: 7)
+        let cal = Calendar.current
+        for ev in events {
+            let date = Date(timeIntervalSince1970: TimeInterval(ev.timestamp) / 1000.0)
+            let weekday = cal.component(.weekday, from: date) // 1 = Sun, 2 = Mon .. 7 = Sat
+            let monBased = (weekday + 5) % 7
+            totals[monBased] += max(0, ev.playTime)
+        }
+        return totals
+    }
+
+    /// Returns top artists ranked by cumulative play time of their songs.
+    public func fetchTopArtists(limit: Int = 10) throws -> [(artist: ArtistEntity, playTimeMs: Int64)] {
+        try dbWriter.read { db in
+            let sql = """
+            SELECT artist.*, COALESCE(SUM(song.totalPlayTime), 0) AS totalMs
+            FROM artist
+            INNER JOIN song_artist_map ON song_artist_map.artistId = artist.id
+            INNER JOIN song ON song.id = song_artist_map.songId
+            GROUP BY artist.id
+            ORDER BY totalMs DESC
+            LIMIT ?
+            """
+            let rows = try Row.fetchAll(db, sql: sql, arguments: [limit])
+            return rows.compactMap { row -> (ArtistEntity, Int64)? in
+                guard let artist = try? ArtistEntity(row: row) else { return nil }
+                let ms: Int64 = row["totalMs"] ?? 0
+                return (artist, ms)
+            }
+        }
+    }
+
+    /// Restores liked states & removes playlists not in `keepPlaylistIds` (for `YouTubeSyncManager.undoLastSync`).
+    public func restoreSyncSnapshot(keepPlaylistIds: Set<String>, likedSongIds: Set<String>) throws {
+        try dbWriter.write { db in
+            let allPlaylists = try PlaylistEntity.fetchAll(db)
+            for pl in allPlaylists where !keepPlaylistIds.contains(pl.id) {
+                try PlaylistEntity.deleteOne(db, key: pl.id)
+            }
+            let allSongs = try SongEntity.fetchAll(db)
+            for var song in allSongs {
+                let shouldBeLiked = likedSongIds.contains(song.id)
+                if song.liked != shouldBeLiked {
+                    song.liked = shouldBeLiked
+                    song.likedDate = shouldBeLiked ? (song.likedDate ?? Int64(Date().timeIntervalSince1970 * 1000)) : nil
+                    try song.save(db)
+                }
+            }
+        }
+    }
 }

@@ -30,7 +30,6 @@ final class MochyInnerTubeTests: XCTestCase {
         XCTAssertEqual(visionReq.value(forHTTPHeaderField: "X-Goog-Api-Format-Version"), "2")
         XCTAssertNil(visionReq.value(forHTTPHeaderField: "Origin"))
         XCTAssertNil(visionReq.value(forHTTPHeaderField: "Referer"))
-        // VISIONOS has loginSupported = false, so no Cookie or Authorization
         XCTAssertNil(visionReq.value(forHTTPHeaderField: "Authorization"))
         XCTAssertEqual(visionCtx.client.utcOffsetMinutes, 0)
         XCTAssertNil(visionCtx.user.onBehalfOfUser)
@@ -86,7 +85,7 @@ final class MochyInnerTubeTests: XCTestCase {
         XCTAssertTrue(fmt.isOriginal)
     }
 
-    func testFormatRankingAndQualityCeilings() {
+    func testFormatRankingExcludesWebMOnIOSAndAppendsProgressiveItag18Fallback() {
         let lowMp4 = PlayerResponse.StreamingData.Format(
             itag: 139, url: "https://ex/139", mimeType: "audio/mp4", bitrate: 48_000,
             audioQuality: "AUDIO_QUALITY_LOW", audioSampleRate: 22_050, audioChannels: 2
@@ -99,17 +98,30 @@ final class MochyInnerTubeTests: XCTestCase {
             itag: 141, url: "https://ex/141", mimeType: "audio/mp4; codecs=\"mp4a.40.2\"", bitrate: 256_000,
             audioQuality: "AUDIO_QUALITY_HIGH", audioSampleRate: 44_100, audioChannels: 2
         )
+        let progressive18 = PlayerResponse.StreamingData.Format(
+            itag: 18, url: "https://ex/18", mimeType: "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+            bitrate: 500_000, width: 640, height: 360
+        )
         let autoDubbed = PlayerResponse.StreamingData.Format(
             itag: 141, url: "https://ex/dub", mimeType: "audio/mp4", bitrate: 320_000,
             audioQuality: "AUDIO_QUALITY_HIGH", audioTrack: .init(displayName: "Spanish", id: "es", isAutoDubbed: true)
         )
 
-        let highRanked = YTPlayerResolver.selectCandidateFormats(
-            from: [lowMp4, highOpus, autoDubbed, premiumMp4],
+        // iOS safe (`preferMp4 == true`): strictly excludes WebM (251) and appends progressive fallback (18)
+        let iosRanked = YTPlayerResolver.selectCandidateFormats(
+            from: [lowMp4, highOpus, autoDubbed, premiumMp4, progressive18],
             quality: .high,
             preferMp4: true
         )
-        XCTAssertEqual(highRanked.map(\.itag), [141, 251, 139])
+        XCTAssertEqual(iosRanked.map(\.itag), [141, 139, 18])
+
+        // Non-iOS (`preferMp4 == false`): allows Opus (251)
+        let anyRanked = YTPlayerResolver.selectCandidateFormats(
+            from: [lowMp4, highOpus, autoDubbed, premiumMp4],
+            quality: .high,
+            preferMp4: false
+        )
+        XCTAssertEqual(anyRanked.map(\.itag), [141, 251, 139])
 
         let lowRanked = YTPlayerResolver.selectCandidateFormats(
             from: [lowMp4, highOpus, premiumMp4],
@@ -119,7 +131,7 @@ final class MochyInnerTubeTests: XCTestCase {
         XCTAssertEqual(lowRanked.map(\.itag), [139])
     }
 
-    func testValidateStreamURLChecksLastByteRangeAndRejects403Cutoff() async {
+    func testValidateStreamURLChecksLastByteRangeAndPast1MiBProbeRejects416() async {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -127,13 +139,19 @@ final class MochyInnerTubeTests: XCTestCase {
         let capturedRanges = LockedBox<[String]>([])
         MockURLProtocol.handler = { request in
             capturedRanges.withLock { $0.append(request.value(forHTTPHeaderField: "Range") ?? "") }
-            let code = request.url?.absoluteString.contains("cutoff") == true ? 403 : 206
-            let resp = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: "HTTP/1.1", headerFields: nil)!
-            return (resp, Data())
+            let urlStr = request.url?.absoluteString ?? ""
+            if urlStr.contains("cutoff403") {
+                return (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)!, Data())
+            }
+            if urlStr.contains("cutoff416") {
+                return (HTTPURLResponse(url: request.url!, statusCode: 416, httpVersion: "HTTP/1.1", headerFields: nil)!, Data())
+            }
+            let headers = ["Content-Range": "bytes 1150000-1150001/4194304"]
+            return (HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: "HTTP/1.1", headerFields: headers)!, Data([0x01, 0x02]))
         }
 
         let cutoffOk = await YTPlayerResolver.validateStreamURL(
-            url: URL(string: "https://cdn.example.com/cutoff")!,
+            url: URL(string: "https://cdn.example.com/cutoff403")!,
             client: .visionOS,
             contentLength: 5_000_000,
             cookie: nil,
@@ -141,15 +159,36 @@ final class MochyInnerTubeTests: XCTestCase {
         )
         XCTAssertFalse(cutoffOk)
 
-        let validOk = await YTPlayerResolver.validateStreamURL(
-            url: URL(string: "https://cdn.example.com/ok")!,
-            client: .visionOS,
-            contentLength: 5_000_000,
+        // When contentLength == nil, probe MUST check bytes=1150000-1150001 and REJECT HTTP 416!
+        let rejected416 = await YTPlayerResolver.validateStreamURL(
+            url: URL(string: "https://cdn.example.com/cutoff416")!,
+            client: .ios,
+            contentLength: nil,
             cookie: nil,
             session: session
         )
-        XCTAssertTrue(validOk)
-        XCTAssertEqual(capturedRanges.value, ["bytes=4999999-4999999", "bytes=4999999-4999999"])
+        XCTAssertFalse(rejected416)
+
+        let validPast1MiB = await YTPlayerResolver.validateStreamURL(
+            url: URL(string: "https://cdn.example.com/ok")!,
+            client: .ios,
+            contentLength: nil,
+            cookie: nil,
+            session: session
+        )
+        XCTAssertTrue(validPast1MiB)
+        XCTAssertEqual(
+            capturedRanges.value,
+            ["bytes=4999999-4999999", "bytes=1150000-1150001", "bytes=1150000-1150001"]
+        )
+    }
+
+    func testStreamHeadersAndWebCreatorOrigin() {
+        XCTAssertEqual(YouTubeClient.webCreator.apiOrigin, "https://studio.youtube.com")
+        let creatorHeaders = YTPlayerResolver.streamHeaders(for: .webCreator, cookie: "SAPISID=x")
+        XCTAssertEqual(creatorHeaders["Origin"], "https://studio.youtube.com")
+        XCTAssertEqual(creatorHeaders["Referer"], "https://studio.youtube.com/")
+        XCTAssertEqual(creatorHeaders["Cookie"], "SAPISID=x")
     }
 
     func testBundledEjsSolverLoadsInJavaScriptCore() throws {
@@ -163,9 +202,7 @@ private final class LockedBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: T
 
-    init(_ value: T) {
-        self.storage = value
-    }
+    init(_ value: T) { self.storage = value }
 
     var value: T {
         lock.lock()

@@ -1,4 +1,5 @@
 import Foundation
+import MochyUI
 
 #if os(iOS) && canImport(ActivityKit)
 import ActivityKit
@@ -27,6 +28,69 @@ public struct MochyLiveActivityAttributes: ActivityAttributes {
     }
 }
 #endif
+
+/// Coordinates iOS `ActivityKit` Live Activities cleanly without breaking free Apple ID sideloaded builds.
+@MainActor
+public final class LiveActivityCoordinator {
+    public static let shared = LiveActivityCoordinator()
+
+    #if os(iOS) && canImport(ActivityKit)
+    private var currentActivity: Activity<MochyLiveActivityAttributes>?
+    private var currentSongId: String?
+    #endif
+
+    private init() {}
+
+    public func update(snapshot: LiveActivitySnapshot?) {
+        #if os(iOS) && canImport(ActivityKit)
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            return
+        }
+
+        guard let snapshot else {
+            endCurrentActivity()
+            return
+        }
+
+        let state = MochyLiveActivityAttributes.ContentState(
+            title: snapshot.title,
+            artist: snapshot.artist,
+            activeLyricLine: snapshot.activeLyricLine,
+            isPlaying: snapshot.isPlaying,
+            progress: snapshot.progress
+        )
+        let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(30))
+
+        if let existing = currentActivity, currentSongId == snapshot.songId {
+            Task {
+                await existing.update(content)
+            }
+        } else {
+            endCurrentActivity()
+            let attrs = MochyLiveActivityAttributes(songId: snapshot.songId)
+            do {
+                currentActivity = try Activity.request(attributes: attrs, content: content, pushType: nil)
+                currentSongId = snapshot.songId
+            } catch {
+                // Gracefully ignore when sideloaded without WidgetKit Live Activity extension.
+                currentActivity = nil
+                currentSongId = nil
+            }
+        }
+        #endif
+    }
+
+    public func endCurrentActivity() {
+        #if os(iOS) && canImport(ActivityKit)
+        guard let existing = currentActivity else { return }
+        currentActivity = nil
+        currentSongId = nil
+        Task {
+            await existing.end(nil, dismissalPolicy: .immediate)
+        }
+        #endif
+    }
+}
 
 #if os(iOS) && canImport(CarPlay)
 import CarPlay

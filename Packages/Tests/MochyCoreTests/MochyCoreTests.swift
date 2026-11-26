@@ -75,7 +75,6 @@ final class MochyCoreTests: XCTestCase {
             "fallback_sid"
         )
 
-        // Known SHA-1("1700000000 test_sid https://music.youtube.com") = 79... verified deterministically
         let header = CryptoUtils.sapisidHash(
             sapisid: "test_sid",
             origin: "https://music.youtube.com",
@@ -90,5 +89,16 @@ final class MochyCoreTests: XCTestCase {
         let encrypted = try XCTUnwrap(CryptoUtils.encryptJioSaavnMediaURL(url))
         let decrypted = try XCTUnwrap(CryptoUtils.decryptJioSaavnMediaURL(encrypted))
         XCTAssertEqual(decrypted, url)
+    }
+
+    func testCode128EncoderProducesValidModuleBitmap() {
+        let text = "MFY2026-11"
+        let modules = Code128Encoder.encode(text)
+        // Expected width: Start(11) + 10 chars(110) + Checksum(11) + Stop(13) = 145 modules
+        XCTAssertEqual(modules.count, 11 + text.count * 11 + 11 + 13)
+        // Code 128B Start symbol (211214) starts with two dark bars, one light space
+        XCTAssertEqual(Array(modules.prefix(3)), [true, true, false])
+        // Stop symbol (2331112) ends with two dark bars
+        XCTAssertEqual(Array(modules.suffix(2)), [true, true])
     }
 }

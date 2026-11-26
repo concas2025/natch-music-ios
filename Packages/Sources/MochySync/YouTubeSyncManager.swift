@@ -46,8 +46,11 @@ public actor YouTubeSyncManager {
         )
 
         let importedIds = try database.fetchImportedPlaylistIds()
-        let sections = try await innerTube.browseHome(browseId: "FEmusic_liked_videos")
         var trackCount = 0
+        var playlistCount = 0
+
+        // 1. Sync Liked Songs (`FEmusic_liked_videos`) WITH authenticated headers (`setLogin: true`)!
+        let sections = try await innerTube.browseHome(browseId: "FEmusic_liked_videos", setLogin: true)
         for section in sections {
             for item in section.items {
                 let song = SongEntity(
@@ -59,16 +62,65 @@ public actor YouTubeSyncManager {
                     liked: true,
                     likedDate: Int64(Date().timeIntervalSince1970 * 1000)
                 )
-                let artists = item.artists.enumerated().map { idx, name in
-                    ArtistEntity(id: "yt-artist-\(name.lowercased())", name: name)
+                let artists = item.artists.map { name in
+                    ArtistEntity(id: "yt-a-\(name.lowercased())", name: name)
                 }
                 try database.upsertSong(song, artists: artists)
                 trackCount += 1
             }
         }
 
+        // 2. Sync User YouTube Music Playlists (`FEmusic_liked_playlists`)
+        let remotePlaylists = (try? await innerTube.browseLibraryPlaylists()) ?? []
+        for plSummary in remotePlaylists {
+            if excludeImportedPlaylists && importedIds.contains(plSummary.id) {
+                continue
+            }
+            let plEntity = PlaylistEntity(
+                id: plSummary.id,
+                name: plSummary.title,
+                browseId: plSummary.id,
+                thumbnailUrl: plSummary.thumbnailURL,
+                isLocal: false,
+                isAutoSync: true
+            )
+            try database.upsertPlaylist(plEntity)
+            playlistCount += 1
+
+            if let detail = try? await innerTube.browsePlaylist(playlistId: plSummary.id, setLogin: true),
+               !detail.tracks.isEmpty {
+                var songIds: [String] = []
+                for track in detail.tracks {
+                    let song = SongEntity(
+                        id: track.id,
+                        title: track.title,
+                        duration: track.durationSeconds ?? -1,
+                        thumbnailUrl: track.thumbnailURL,
+                        albumName: track.album
+                    )
+                    let artists = track.artists.map { ArtistEntity(id: "yt-a-\($0.lowercased())", name: $0) }
+                    try database.upsertSong(song, artists: artists)
+                    songIds.append(track.id)
+                    trackCount += 1
+                }
+                try database.replacePlaylistSongs(playlistId: plEntity.id, songIds: songIds)
+            }
+        }
+
         let skipped = excludeImportedPlaylists ? importedIds.count : 0
-        return SyncSummary(importedTracks: trackCount, importedPlaylists: 0, skippedImportedPlaylists: skipped)
+        return SyncSummary(importedTracks: trackCount, importedPlaylists: playlistCount, skippedImportedPlaylists: skipped)
+    }
+
+    /// Reverts the most recent YouTube Music library sync back to the captured `SyncUndoSnapshot`.
+    @discardableResult
+    public func undoLastSync() throws -> Bool {
+        guard let snap = lastUndoSnapshot else { return false }
+        try database.restoreSyncSnapshot(
+            keepPlaylistIds: Set(snap.playlistIds),
+            likedSongIds: Set(snap.likedSongIds)
+        )
+        lastUndoSnapshot = nil
+        return true
     }
 
     public func setRemoteLikeStatus(videoId: String, liked: Bool) async throws {

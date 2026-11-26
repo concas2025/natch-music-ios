@@ -5,8 +5,6 @@ import XCTest
 
 final class MochyModulesTests: XCTestCase {
     func testFlacStreamInfoParserParses16BitAnd24BitHeaders() {
-        // 16-bit / 44100 Hz / 2ch FLAC header
-        // sampleRate = 44100 = 0x0AC44 -> b18=0x0A, b19=0xC4, b20=(4<<4)|(1<<1)|0 = 0x42, b21=(15<<4) = 0xF0
         var hdr16 = [UInt8](repeating: 0, count: 26)
         hdr16[0] = 0x66; hdr16[1] = 0x4C; hdr16[2] = 0x61; hdr16[3] = 0x43
         hdr16[18] = 0x0A; hdr16[19] = 0xC4; hdr16[20] = 0x42; hdr16[21] = 0xF0
@@ -16,8 +14,6 @@ final class MochyModulesTests: XCTestCase {
         XCTAssertEqual(info16?.bitsPerSample, 16)
         XCTAssertEqual(info16?.isHiRes, false)
 
-        // 24-bit / 96000 Hz / 2ch FLAC header
-        // 96000 = 0x17700 -> b18=0x17, b19=0x70, b20=(0<<4)|(1<<1)|1 = 0x03, b21=(7<<4) = 0x70
         var hdr24 = [UInt8](repeating: 0, count: 26)
         hdr24[0] = 0x66; hdr24[1] = 0x4C; hdr24[2] = 0x61; hdr24[3] = 0x43
         hdr24[18] = 0x17; hdr24[19] = 0x70; hdr24[20] = 0x03; hdr24[21] = 0x70
@@ -39,6 +35,76 @@ final class MochyModulesTests: XCTestCase {
 
         let clean = ModuleUrlGuard.sanitizeHeaders(["User-Agent": "Mochy", "Cookie": "SID=123", "Authorization": "Bearer X"])
         XCTAssertEqual(clean, ["User-Agent": "Mochy"])
+    }
+
+    func testMonochromeParseSearchCandidatesHandlesRealStreamerAndRelayPayloads() {
+        let streamerPayload: [String: Any] = [
+            "tracks": [
+                [
+                    "trackId": "tr_99123",
+                    "title": "Blinding Lights",
+                    "artistNames": ["The Weeknd", "Max Martin"],
+                    "duration": 200_040,
+                    "playable": true,
+                    "isrc": "USUG11904206",
+                ],
+                [
+                    "trackId": "tr_unplayable",
+                    "title": "Blocked Track",
+                    "artistNames": ["Blocked"],
+                    "duration": 180_000,
+                    "playable": false,
+                ],
+            ]
+        ]
+        let parsedStreamer = MonochromeModule.parseSearchCandidates(from: streamerPayload, kind: .streamer)
+        XCTAssertEqual(parsedStreamer.count, 1)
+        XCTAssertEqual(parsedStreamer[0].item, "tr_99123")
+        XCTAssertEqual(parsedStreamer[0].artist, "The Weeknd, Max Martin")
+        XCTAssertEqual(parsedStreamer[0].durationSeconds, 200)
+        XCTAssertEqual(parsedStreamer[0].isrc, "USUG11904206")
+
+        let relayPayload: [String: Any] = [
+            "data": [
+                [
+                    "id": 7742,
+                    "title": "Starboy",
+                    "artist": "The Weeknd&Daft Punk",
+                    "duration": 230,
+                ]
+            ]
+        ]
+        let parsedRelay = MonochromeModule.parseSearchCandidates(from: relayPayload, kind: .relay)
+        XCTAssertEqual(parsedRelay.count, 1)
+        XCTAssertEqual(parsedRelay[0].item, "7742")
+        XCTAssertEqual(parsedRelay[0].artist, "The Weeknd, Daft Punk")
+        XCTAssertEqual(parsedRelay[0].durationSeconds, 230)
+    }
+
+    func testJioSaavnParseSearchCandidatesUnescapesHTMLAndDetects320kbps() {
+        let saavnPayload: [String: Any] = [
+            "results": [
+                [
+                    "title": "Rock &amp; Roll &quot;Live&#039;s&quot;",
+                    "more_info": [
+                        "encrypted_media_url": "ENC_BASE64_TOKEN",
+                        "duration": "214",
+                        "320kbps": "true",
+                        "artistMap": [
+                            "primary_artists": [
+                                ["name": "Arijit &amp; Friends"]
+                            ]
+                        ],
+                    ],
+                ]
+            ]
+        ]
+        let parsed = JioSaavnModule.parseSearchCandidates(from: saavnPayload)
+        XCTAssertEqual(parsed.count, 1)
+        XCTAssertEqual(parsed[0].title, "Rock & Roll \"Live's\"")
+        XCTAssertEqual(parsed[0].artist, "Arijit & Friends")
+        XCTAssertEqual(parsed[0].durationSeconds, 214)
+        XCTAssertTrue(parsed[0].item.has320)
     }
 
     func testSourceModulesRouterRespectsPriorityAndLocalBypass() async throws {

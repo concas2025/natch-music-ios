@@ -43,6 +43,14 @@ public actor SourceModulesRouter {
         modules[module.id] = module
     }
 
+    public func unregisterModule(id: String) {
+        modules.removeValue(forKey: id)
+    }
+
+    public func registeredModuleIds() -> [String] {
+        Array(modules.keys).sorted()
+    }
+
     public func setForcedRoute(trackId: String, sourceId: String?) {
         forcedRoutes[trackId] = sourceId
     }
@@ -185,12 +193,17 @@ public actor SourceModulesRouter {
             preferMp4: preferMp4OnIOS
         )
         let kbps = resolved.format.bitrate / 1000
-        let codecName = resolved.format.mimeType.lowercased().contains("opus") ? "Opus" : "AAC"
+        let lowerMime = resolved.format.mimeType.lowercased()
+        let codecName = lowerMime.contains("opus") ? "Opus" : "AAC"
+        let cleanMime = lowerMime.split(separator: ";").first.map(String.init) ?? "audio/mp4"
         return ModuleStream(
             url: resolved.streamURL,
             headers: resolved.requiredHeaders,
             format: .progressive,
             codec: codecName,
+            mimeType: cleanMime,
+            contentLength: resolved.verifiedContentLength ?? resolved.format.contentLength,
+            durationSeconds: resolved.authoritativeDurationSeconds ?? track.durationSeconds,
             sampleRate: resolved.format.audioSampleRate,
             bitDepth: 16,
             bitrate: resolved.format.bitrate,

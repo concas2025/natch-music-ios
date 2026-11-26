@@ -1,13 +1,15 @@
 import Foundation
 
-/// 512 KB HTTP Range chunked LRU disk cache modeled after Mochy's chunked stream cache (`CHUNK_LENGTH = 512 * 1024`).
+/// HTTP Range chunked LRU disk cache with real container file extensions (`.m4a`, `.flac`, `.mp3`, `.mp4`)
+/// so CoreAudio / `AVURLAsset` opens completed cached files without `kAudioFileUnsupportedFileTypeError`.
 public actor ChunkRangeCache {
-    public static let chunkLengthBytes = 512 * 1024
+    public static let chunkLengthBytes = 256 * 1024
 
     private struct IndexMeta: Codable {
         var maxBytes: Int64
         var completedMediaIds: Set<String>
         var lastAccess: [String: TimeInterval]
+        var fileExtensions: [String: String]?
     }
 
     private let directory: URL
@@ -25,10 +27,11 @@ public actor ChunkRangeCache {
 
         let metaURL = base.appendingPathComponent("index.json")
         if let data = try? Data(contentsOf: metaURL),
-           let decoded = try? JSONDecoder().decode(IndexMeta.self, from: data) {
+           var decoded = try? JSONDecoder().decode(IndexMeta.self, from: data) {
+            if decoded.fileExtensions == nil { decoded.fileExtensions = [:] }
             self.meta = decoded
         } else {
-            self.meta = IndexMeta(maxBytes: maxCacheBytes, completedMediaIds: [], lastAccess: [:])
+            self.meta = IndexMeta(maxBytes: maxCacheBytes, completedMediaIds: [], lastAccess: [:], fileExtensions: [:])
         }
     }
 
@@ -36,8 +39,19 @@ public actor ChunkRangeCache {
         meta.completedMediaIds.contains(mediaId) && FileManager.default.fileExists(atPath: completeFileURL(mediaId: mediaId).path)
     }
 
-    public func completeFileURL(mediaId: String) -> URL {
-        directory.appendingPathComponent("\(safeId(mediaId)).audio")
+    public func completeFileURL(mediaId: String, fileExtension: String? = nil) -> URL {
+        let ext = Self.sanitizedExtension(fileExtension ?? meta.fileExtensions?[mediaId] ?? "m4a")
+        return directory.appendingPathComponent("\(safeId(mediaId)).\(ext)")
+    }
+
+    public func downloadedMediaIds() -> Set<String> {
+        meta.completedMediaIds.filter { id in
+            FileManager.default.fileExists(atPath: completeFileURL(mediaId: id).path)
+        }
+    }
+
+    public func totalDiskUsageBytes() -> Int64 {
+        currentDiskUsageBytes()
     }
 
     public func storeChunk(mediaId: String, chunkIndex: Int, data: Data) throws {
@@ -59,15 +73,58 @@ public actor ChunkRangeCache {
         return data
     }
 
-    public func markCompleted(mediaId: String, fullFileData: Data) throws {
-        try fullFileData.write(to: completeFileURL(mediaId: mediaId), options: .atomic)
+    public func markCompleted(mediaId: String, fileExtension: String = "m4a", fullFileData: Data) throws {
+        let ext = Self.sanitizedExtension(fileExtension)
+        var exts = meta.fileExtensions ?? [:]
+        exts[mediaId] = ext
+        meta.fileExtensions = exts
+        let target = completeFileURL(mediaId: mediaId, fileExtension: ext)
+        try fullFileData.write(to: target, options: .atomic)
         meta.completedMediaIds.insert(mediaId)
         meta.lastAccess[mediaId] = Date().timeIntervalSince1970
         evictIfNeeded()
         saveMeta()
     }
 
-    /// Prefetches the opening 512 KB chunk for instant SkipBlend / Crossmix start.
+    /// Promotes a completed file from `LocalAudioProxy`'s sparse buffer directly into the LRU cache.
+    public func copyCompletedFile(mediaId: String, from sourceURL: URL, fileExtension: String) throws -> URL {
+        let ext = Self.sanitizedExtension(fileExtension)
+        var exts = meta.fileExtensions ?? [:]
+        exts[mediaId] = ext
+        meta.fileExtensions = exts
+        let target = completeFileURL(mediaId: mediaId, fileExtension: ext)
+        if FileManager.default.fileExists(atPath: target.path) {
+            try FileManager.default.removeItem(at: target)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: target)
+        meta.completedMediaIds.insert(mediaId)
+        meta.lastAccess[mediaId] = Date().timeIntervalSince1970
+        evictIfNeeded()
+        saveMeta()
+        return target
+    }
+
+    public func removeMedia(mediaId: String) {
+        let chunkDir = directory.appendingPathComponent(safeId(mediaId), isDirectory: true)
+        let fullFile = completeFileURL(mediaId: mediaId)
+        try? FileManager.default.removeItem(at: chunkDir)
+        try? FileManager.default.removeItem(at: fullFile)
+        meta.completedMediaIds.remove(mediaId)
+        meta.lastAccess.removeValue(forKey: mediaId)
+        meta.fileExtensions?.removeValue(forKey: mediaId)
+        saveMeta()
+    }
+
+    public func clearAll() {
+        if let contents = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            for item in contents {
+                try? FileManager.default.removeItem(at: item)
+            }
+        }
+        meta = IndexMeta(maxBytes: maxCacheBytes, completedMediaIds: [], lastAccess: [:], fileExtensions: [:])
+        saveMeta()
+    }
+
     public func prefetchFirstChunk(
         mediaId: String,
         url: URL,
@@ -101,6 +158,7 @@ public actor ChunkRangeCache {
             try? FileManager.default.removeItem(at: fullFile)
             meta.completedMediaIds.remove(id)
             meta.lastAccess.removeValue(forKey: id)
+            meta.fileExtensions?.removeValue(forKey: id)
             total = currentDiskUsageBytes()
         }
     }
@@ -132,5 +190,17 @@ public actor ChunkRangeCache {
 
     private func safeId(_ id: String) -> String {
         id.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "_", options: .regularExpression)
+    }
+
+    public static func sanitizedExtension(_ raw: String) -> String {
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: ".", with: "")
+        switch lower {
+        case "m4a", "mp4", "flac", "mp3", "wav", "aac", "alac", "caf":
+            return lower
+        default:
+            return "m4a"
+        }
     }
 }

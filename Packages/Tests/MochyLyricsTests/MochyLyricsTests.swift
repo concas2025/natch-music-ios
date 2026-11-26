@@ -1,4 +1,5 @@
 import XCTest
+@testable import MochyDatabase
 @testable import MochyLyrics
 
 final class MochyLyricsTests: XCTestCase {
@@ -44,7 +45,6 @@ final class MochyLyricsTests: XCTestCase {
             isWordTimed: true,
             script: .kana
         )
-        // Metadata written in Kanji ("夜に駆ける") -> Japan disambiguation rule must promote .kana over .han!
         let query = LyricsQuery(videoId: "v1", title: "夢見", artist: "米津玄師")
         let winner = LyricsHelper.pickBest(candidates: [chineseNetEase, japaneseBetter], query: query)
         XCTAssertEqual(winner?.sourceProvider, "BetterLyrics")
@@ -54,5 +54,56 @@ final class MochyLyricsTests: XCTestCase {
         let rom = LyricsRomanizer.romanize("東京")
         XCTAssertFalse(rom.isEmpty)
         XCTAssertNotEqual(rom, "東京")
+    }
+
+    func testLyricsDocumentLosslessSQLiteCacheRoundTrip() throws {
+        let db = try MochyDatabase.inMemory()
+        try db.upsertSong(SongEntity(id: "song_karaoke", title: "Duet Song", duration: 200))
+
+        let original = LyricsDocument(
+            sourceProvider: "BetterLyrics",
+            lines: [
+                LyricsLine(
+                    startMs: 1200,
+                    endMs: 4000,
+                    text: "夜に駆ける",
+                    words: [
+                        LyricsWord(startMs: 1200, endMs: 2200, text: "夜に"),
+                        LyricsWord(startMs: 2250, endMs: 4000, text: "駆ける"),
+                    ],
+                    agent: .v1,
+                    isBackground: false,
+                    romanized: "yoru ni kakeru",
+                    translated: "Racing into the night"
+                ),
+                LyricsLine(
+                    startMs: 4200,
+                    endMs: 5600,
+                    text: "(Whoa)",
+                    words: [LyricsWord(startMs: 4200, endMs: 5600, text: "(Whoa)", isBackground: true)],
+                    agent: .v2,
+                    isBackground: true
+                ),
+            ],
+            isSynced: true,
+            isWordTimed: true,
+            hasDuet: true,
+            hasBackgroundVocals: true,
+            script: .kana
+        )
+
+        let payload = original.encodeCachePayload()
+        XCTAssertTrue(payload.hasPrefix(LyricsDocument.cachedJSONPrefix))
+
+        try db.upsertLyrics(LyricsEntity(id: "song_karaoke", lyrics: payload, provider: original.sourceProvider))
+        let fetched = try XCTUnwrap(db.fetchLyrics(id: "song_karaoke"))
+        let restored = try XCTUnwrap(LyricsDocument.decodeCachePayload(fetched.lyrics, provider: fetched.provider))
+
+        XCTAssertEqual(restored, original)
+        XCTAssertEqual(restored.lines[0].words.count, 2)
+        XCTAssertEqual(restored.lines[0].romanized, "yoru ni kakeru")
+        XCTAssertEqual(restored.lines[0].translated, "Racing into the night")
+        XCTAssertEqual(restored.lines[1].agent, .v2)
+        XCTAssertTrue(restored.lines[1].isBackground)
     }
 }

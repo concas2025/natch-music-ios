@@ -2,6 +2,9 @@ import Foundation
 #if canImport(WebKit)
 import WebKit
 #endif
+#if os(iOS) && canImport(UIKit)
+import UIKit
+#endif
 
 public struct PoTokenResult: Sendable, Equatable {
     public let playerRequestPoToken: String
@@ -30,10 +33,10 @@ public enum PoTokenError: Error, LocalizedError {
 }
 
 /// Native iOS BotGuard `poToken` generator mirroring Mochy's `PoTokenGenerator` + `PoTokenWebView`.
+/// Attaches its hidden `WKWebView` to the active `UIWindow` while minting so WebKit never throttles `setInterval`.
 public actor PoTokenGenerator {
     private static let mintCooldownSeconds: TimeInterval = 5 * 60
     private static let idleCloseSeconds: UInt64 = 60_000_000_000
-    // Public YouTube Web BotGuard endpoint API key (non-secret client identifier from BgUtils).
     private static let jnnBaseURL = "https://www.youtube.com/api/jnn/v1"
     private static let requestKey = "O43z0dpjhgX20SCx4KAo"
 
@@ -44,12 +47,19 @@ public actor PoTokenGenerator {
     private var expiresAt: Date = .distantPast
     private var idleTask: Task<Void, Never>?
 
-    #if canImport(WebKit)
+    #if canImport(WebKit) && os(iOS)
     private var runner: PoTokenWebRunner?
     #endif
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.timeoutIntervalForRequest = 10
+            cfg.timeoutIntervalForResource = 15
+            self.session = URLSession(configuration: cfg)
+        }
     }
 
     public var hasSessionToken: Bool {
@@ -63,7 +73,7 @@ public actor PoTokenGenerator {
     public func releaseWebView() async {
         idleTask?.cancel()
         idleTask = nil
-        #if canImport(WebKit)
+        #if canImport(WebKit) && os(iOS)
         if let current = runner {
             runner = nil
             await current.close()
@@ -72,18 +82,20 @@ public actor PoTokenGenerator {
     }
 
     public func poTokenFor(videoId: String, sessionId: String) async -> PoTokenResult? {
-        if isInCooldown {
+        if isInCooldown || sessionId.isEmpty {
             return nil
         }
 
-        // shortcut: skips BotGuard WebView execution when running without WebKit / headless XCTest host; upgrade if headless WebKit harness is added.
         #if canImport(WebKit) && os(iOS)
         do {
-            let result = try await mintPoTokenPair(videoId: videoId, sessionId: sessionId)
+            let result = try await withTimeout(seconds: 14) {
+                try await self.mintPoTokenPair(videoId: videoId, sessionId: sessionId)
+            }
             scheduleIdleClose()
             return result
         } catch {
             mintCooldownUntil = Date().addingTimeInterval(Self.mintCooldownSeconds)
+            await releaseWebView()
             return nil
         }
         #else
@@ -96,20 +108,26 @@ public actor PoTokenGenerator {
         if runner == nil || Date() >= expiresAt || cachedSessionId != sessionId || cachedSessionPoToken == nil {
             if let old = runner {
                 await old.close()
+                runner = nil
             }
             let webRunner = try await PoTokenWebRunner.create()
-            let challenge = try await fetchBotGuardChallenge()
-            let bgResponse = try await webRunner.runBotGuard(challengeJSON: challenge)
-            let itResponse = try await fetchIntegrityToken(botguardResponse: bgResponse)
+            do {
+                let challengePayload = try await fetchBotGuardChallenge()
+                let bgResponse = try await webRunner.runBotGuard(rawPayload: challengePayload)
+                let itResponse = try await fetchIntegrityToken(botguardResponse: bgResponse)
 
-            let ttl = max(60, itResponse.ttlSeconds)
-            try await webRunner.createMinter(integrityToken: itResponse.integrityToken)
+                let ttl = max(60, itResponse.ttlSeconds)
+                try await webRunner.createMinter(integrityToken: itResponse.integrityToken)
 
-            let sessionPot = try await webRunner.obtainToken(identifier: sessionId)
-            self.runner = webRunner
-            self.cachedSessionId = sessionId
-            self.cachedSessionPoToken = sessionPot
-            self.expiresAt = Date().addingTimeInterval(TimeInterval(ttl))
+                let sessionPot = try await webRunner.obtainToken(identifier: sessionId)
+                self.runner = webRunner
+                self.cachedSessionId = sessionId
+                self.cachedSessionPoToken = sessionPot
+                self.expiresAt = Date().addingTimeInterval(TimeInterval(ttl))
+            } catch {
+                await webRunner.close()
+                throw error
+            }
         }
 
         guard let activeRunner = runner, let sessionPot = cachedSessionPoToken else {
@@ -118,9 +136,24 @@ public actor PoTokenGenerator {
         let streamPot = try await activeRunner.obtainToken(identifier: videoId)
         return PoTokenResult(playerRequestPoToken: sessionPot, streamingDataPoToken: streamPot)
     }
+
+    private func withTimeout<T: Sendable>(seconds: Double, operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw PoTokenError.mintTimeout
+            }
+            guard let first = try await group.next() else {
+                throw PoTokenError.mintTimeout
+            }
+            group.cancelAll()
+            return first
+        }
+    }
     #endif
 
-    private func fetchBotGuardChallenge() async throws -> [Any] {
+    private func fetchBotGuardChallenge() async throws -> String {
         var req = URLRequest(url: URL(string: "\(Self.jnnBaseURL)/Create")!)
         req.httpMethod = "POST"
         req.setValue("application/json+protobuf", forHTTPHeaderField: "Content-Type")
@@ -130,10 +163,11 @@ public actor PoTokenGenerator {
 
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let arr = try JSONSerialization.jsonObject(with: data) as? [Any], !arr.isEmpty else {
+              let arr = try JSONSerialization.jsonObject(with: data) as? [Any],
+              let rawPayload = arr.first as? String, !rawPayload.isEmpty else {
             throw PoTokenError.challengeFailed("Invalid Create response")
         }
-        return arr
+        return rawPayload
     }
 
     private func fetchIntegrityToken(botguardResponse: String) async throws -> (integrityToken: [Int], ttlSeconds: Int) {
@@ -176,19 +210,29 @@ public actor PoTokenGenerator {
     }
 }
 
-#if canImport(WebKit)
+#if canImport(WebKit) && os(iOS)
 @MainActor
 private final class PoTokenWebRunner: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
     private var loadContinuation: CheckedContinuation<Void, Error>?
-    private var webPoSignalOutputJSON: Any?
+    private var webPoSignalReady = false
 
     private override init() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
-        self.webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: config)
+        self.webView = WKWebView(frame: CGRect(x: -10, y: -10, width: 2, height: 2), configuration: config)
+        self.webView.alpha = 0.01
+        self.webView.isUserInteractionEnabled = false
         super.init()
         self.webView.navigationDelegate = self
+        attachToActiveWindow()
+    }
+
+    private func attachToActiveWindow() {
+        guard webView.superview == nil else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let keyWindow = scenes.flatMap(\.windows).first(where: \.isKeyWindow) ?? scenes.first?.windows.first
+        keyWindow?.addSubview(webView)
     }
 
     static func create() async throws -> PoTokenWebRunner {
@@ -218,9 +262,13 @@ private final class PoTokenWebRunner: NSObject, WKNavigationDelegate {
         loadContinuation = nil
     }
 
-    func runBotGuard(challengeJSON: [Any]) async throws -> String {
-        guard let rawPayload = challengeJSON.first as? String,
-              let data = rawPayload.data(using: .utf8),
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        loadContinuation?.resume(throwing: error)
+        loadContinuation = nil
+    }
+
+    func runBotGuard(rawPayload: String) async throws -> String {
+        guard let data = rawPayload.data(using: .utf8),
               let parsed = try JSONSerialization.jsonObject(with: data) as? [Any],
               parsed.count >= 8 else {
             throw PoTokenError.challengeFailed("Unexpected BotGuard challenge envelope")
@@ -246,12 +294,12 @@ private final class PoTokenWebRunner: NSObject, WKNavigationDelegate {
         guard let responseString = result as? String else {
             throw PoTokenError.challengeFailed("BotGuard snapshot returned non-string")
         }
-        webPoSignalOutputJSON = true
+        webPoSignalReady = true
         return responseString
     }
 
     func createMinter(integrityToken: [Int]) async throws {
-        guard webPoSignalOutputJSON != nil else {
+        guard webPoSignalReady else {
             throw PoTokenError.webViewUnavailable
         }
         let script = """
@@ -270,7 +318,7 @@ private final class PoTokenWebRunner: NSObject, WKNavigationDelegate {
         let idBytes = Array(identifier.utf8).map { Int($0) }
         let script = """
         const bytes = await obtainPoToken(new Uint8Array(identifierBytes));
-        return btoa(String.fromCharCode(...bytes)).replace(/\\+/g, '-').replace(/\\//g, '_');
+        return btoa(String.fromCharCode(...bytes)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
         """
         let result = try await webView.callAsyncJavaScript(
             script,
@@ -285,8 +333,12 @@ private final class PoTokenWebRunner: NSObject, WKNavigationDelegate {
     }
 
     func close() {
+        loadContinuation?.resume(throwing: PoTokenError.webViewUnavailable)
+        loadContinuation = nil
         webView.stopLoading()
+        webView.navigationDelegate = nil
         webView.loadHTMLString("", baseURL: nil)
+        webView.removeFromSuperview()
     }
 }
 #endif

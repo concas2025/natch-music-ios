@@ -88,6 +88,35 @@ public struct LyricsDocument: Codable, Sendable, Equatable {
         lines.map(\.text).joined(separator: "\n")
     }
 
+    public static let cachedJSONPrefix = "MOCHY_LYR_JSON_V1:"
+
+    /// Serializes the full `LyricsDocument` (including word-timings, duet agents, background vocals,
+    /// romanization, and translations) so SQLite caching never degrades synced lyrics into plain text.
+    public func encodeCachePayload() -> String {
+        if let data = try? JSONEncoder().encode(self),
+           let json = String(data: data, encoding: .utf8) {
+            return Self.cachedJSONPrefix + json
+        }
+        return plainText
+    }
+
+    /// Restores a cached `LyricsDocument` losslessly from JSON payload, falling back cleanly to TTML / LRC parsing.
+    public static func decodeCachePayload(_ raw: String, provider: String) -> LyricsDocument? {
+        if raw.hasPrefix(cachedJSONPrefix) {
+            let jsonPart = String(raw.dropFirst(cachedJSONPrefix.count))
+            if let data = jsonPart.data(using: .utf8),
+               let doc = try? JSONDecoder().decode(LyricsDocument.self, from: data),
+               !doc.lines.isEmpty {
+                return doc
+            }
+        }
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<"),
+           let ttmlDoc = TTMLParser.parse(raw, provider: provider) {
+            return ttmlDoc
+        }
+        return LRCParser.parse(raw, provider: provider)
+    }
+
     public init(
         sourceProvider: String,
         lines: [LyricsLine],

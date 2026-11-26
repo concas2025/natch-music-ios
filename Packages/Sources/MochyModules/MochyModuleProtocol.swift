@@ -37,6 +37,9 @@ public struct ModuleStream: Sendable, Equatable {
     public let headers: [String: String]
     public let format: StreamFormat
     public let codec: String
+    public let mimeType: String?
+    public let contentLength: Int64?
+    public let durationSeconds: Int?
     public let sampleRate: Int?
     public let bitDepth: Int?
     public let bitrate: Int?
@@ -51,6 +54,9 @@ public struct ModuleStream: Sendable, Equatable {
         headers: [String: String] = [:],
         format: StreamFormat = .progressive,
         codec: String,
+        mimeType: String? = nil,
+        contentLength: Int64? = nil,
+        durationSeconds: Int? = nil,
         sampleRate: Int? = nil,
         bitDepth: Int? = nil,
         bitrate: Int? = nil,
@@ -64,6 +70,9 @@ public struct ModuleStream: Sendable, Equatable {
         self.headers = headers
         self.format = format
         self.codec = codec
+        self.mimeType = mimeType
+        self.contentLength = contentLength
+        self.durationSeconds = durationSeconds
         self.sampleRate = sampleRate
         self.bitDepth = bitDepth
         self.bitrate = bitrate
