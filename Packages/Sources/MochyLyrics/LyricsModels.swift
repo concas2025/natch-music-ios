@@ -1,0 +1,138 @@
+import Foundation
+
+public enum ScriptKind: String, Codable, Sendable, Equatable {
+    case han
+    case kana
+    case hangul
+    case devanagari
+    case cyrillic
+    case arabic
+    case latin
+    case unknown
+
+    public var isCJK: Bool {
+        self == .han || self == .kana || self == .hangul
+    }
+}
+
+public struct LyricsWord: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let startMs: Int
+    public let endMs: Int
+    public let text: String
+    public let isBackground: Bool
+
+    public init(
+        startMs: Int,
+        endMs: Int,
+        text: String,
+        isBackground: Bool = false
+    ) {
+        self.id = "\(startMs)-\(text.hashValue)"
+        self.startMs = startMs
+        self.endMs = max(startMs, endMs)
+        self.text = text
+        self.isBackground = isBackground
+    }
+}
+
+public enum DuetAgent: String, Codable, Sendable, Equatable {
+    case v1
+    case v2
+}
+
+public struct LyricsLine: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let startMs: Int
+    public let endMs: Int?
+    public let text: String
+    public let words: [LyricsWord]
+    public let agent: DuetAgent?
+    public let isBackground: Bool
+    public var romanized: String?
+    public var translated: String?
+
+    public init(
+        startMs: Int,
+        endMs: Int? = nil,
+        text: String,
+        words: [LyricsWord] = [],
+        agent: DuetAgent? = nil,
+        isBackground: Bool = false,
+        romanized: String? = nil,
+        translated: String? = nil
+    ) {
+        self.id = "\(startMs)-\(text)"
+        self.startMs = startMs
+        self.endMs = endMs
+        self.text = text
+        self.words = words
+        self.agent = agent
+        self.isBackground = isBackground
+        self.romanized = romanized
+        self.translated = translated
+    }
+}
+
+public struct LyricsDocument: Codable, Sendable, Equatable {
+    public let sourceProvider: String
+    public let lines: [LyricsLine]
+    public let isSynced: Bool
+    public let isWordTimed: Bool
+    public let hasDuet: Bool
+    public let hasBackgroundVocals: Bool
+    public let isSyllableSplit: Bool
+    public let script: ScriptKind
+
+    public var plainText: String {
+        lines.map(\.text).joined(separator: "\n")
+    }
+
+    public init(
+        sourceProvider: String,
+        lines: [LyricsLine],
+        isSynced: Bool,
+        isWordTimed: Bool,
+        hasDuet: Bool = false,
+        hasBackgroundVocals: Bool = false,
+        isSyllableSplit: Bool = false,
+        script: ScriptKind = .unknown
+    ) {
+        self.sourceProvider = sourceProvider
+        self.lines = lines
+        self.isSynced = isSynced
+        self.isWordTimed = isWordTimed
+        self.hasDuet = hasDuet
+        self.hasBackgroundVocals = hasBackgroundVocals
+        self.isSyllableSplit = isSyllableSplit
+        self.script = script
+    }
+}
+
+public struct LyricsQuery: Sendable, Equatable {
+    public let videoId: String
+    public let title: String
+    public let artist: String
+    public let album: String?
+    public let durationSeconds: Int
+    public let isrc: String?
+    public let localFileURL: URL?
+
+    public init(
+        videoId: String,
+        title: String,
+        artist: String,
+        album: String? = nil,
+        durationSeconds: Int = 0,
+        isrc: String? = nil,
+        localFileURL: URL? = nil
+    ) {
+        self.videoId = videoId
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.durationSeconds = durationSeconds
+        self.isrc = isrc
+        self.localFileURL = localFileURL
+    }
+}

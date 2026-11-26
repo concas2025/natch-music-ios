@@ -1,0 +1,22 @@
+# Xcode / Swift / SPM
+.build/
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+DerivedData/
+build/
+dist/
+*.ipa
+*.xcarchive
+*.dSYM.zip
+*.dSYM
+
+# macOS / Windows / IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.vscode/
+.idea/

@@ -1,0 +1,119 @@
+name: Build & Release Natch Music iOS IPA
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional version tag to publish as a GitHub Release (e.g. v1.0.1)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-build-ipa:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine version and release flags
+        id: meta
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            SHOULD_RELEASE="true"
+          elif [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+            SHOULD_RELEASE="true"
+          else
+            SHORT_SHA="${GITHUB_SHA::7}"
+            TAG="dev-${SHORT_SHA}"
+            SHOULD_RELEASE="false"
+          fi
+          CLEAN_VER="${TAG#v}"
+          CLEAN_VER="${CLEAN_VER%%-*}"
+          if [[ ! "$CLEAN_VER" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            CLEAN_VER="1.0.0"
+          fi
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "marketing_version=$CLEAN_VER" >> "$GITHUB_OUTPUT"
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=NatchMusic-${TAG}-unsigned.ipa" >> "$GITHUB_OUTPUT"
+          echo "Tag=$TAG Version=$CLEAN_VER Release=$SHOULD_RELEASE"
+
+      - name: Inspect Xcode toolchain
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+
+      - name: Run Swift package unit tests
+        run: swift test --package-path Packages
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Archive unsigned iOS app
+        run: |
+          xcodebuild archive \
+            -project NatchMusic.xcodeproj \
+            -scheme NatchMusic \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/NatchMusic.xcarchive" \
+            MARKETING_VERSION="${{ steps.meta.outputs.marketing_version }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package unsigned IPA
+        run: |
+          IPA_NAME="${{ steps.meta.outputs.ipa_name }}"
+          mkdir -p dist/Payload
+          cp -R "$RUNNER_TEMP/NatchMusic.xcarchive/Products/Applications/NatchMusic.app" dist/Payload/
+          (cd dist && zip -qry "../${IPA_NAME}" Payload)
+          ls -lh "${IPA_NAME}"
+
+      - name: Upload IPA workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.ipa_name }}
+          path: ${{ steps.meta.outputs.ipa_name }}
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.release_tag }}"
+          IPA_NAME="${{ steps.meta.outputs.ipa_name }}"
+          NOTES=$(cat <<EOF
+          ## Natch Music ${TAG} (iOS Unsigned IPA)
+
+          - **Version:** \`${TAG}\`
+          - **Format:** Unsigned \`.ipa\` ready to sideload via **AltStore**, **SideStore**, **Sideloadly**, or **TrollStore**.
+          - **Open-Source Attribution (GPL-3.0):** Port based on [Mochy Music](https://github.com/realidkroo/Mochy-Music), built upon ViviMusic, Metrolist, InnerTune, Monochrome, yt-dlp EJS, BgUtils, MIT KEMAR HRTF, AutoEq, and GRDB.swift. 100% free & ad-free.
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$IPA_NAME" --clobber
+            gh release edit "$TAG" --title "Natch Music ${TAG}" --notes "$NOTES"
+          else
+            gh release create "$TAG" "$IPA_NAME" \
+              --title "Natch Music ${TAG}" \
+              --notes "$NOTES"
+          fi
