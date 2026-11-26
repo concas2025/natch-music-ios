@@ -38,12 +38,12 @@ public enum RootNavTab: String, CaseIterable, Sendable {
 @MainActor
 @Observable
 public final class AppCoordinator {
-    public let settings: AppSettings
+    public var settings: AppSettings
     public let database: MochyDatabase
     public let innerTube: InnerTubeClient
     public let resolver: YTPlayerResolver
     public let router: SourceModulesRouter
-    public let player: MochyAudioPlayer
+    public var player: MochyAudioPlayer
     public let lyricsHelper: LyricsHelper
     public let lyricsTranslator: LyricsTranslator
     public let syncManager: YouTubeSyncManager

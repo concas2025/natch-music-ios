@@ -342,7 +342,7 @@ public struct VideoPlayerView: View {
             if let best = coordinator.videoStreamOptions.first {
                 let p = AVPlayer(url: best.url)
                 p.isMuted = true // Keep audio routed cleanly through MochyAudioPlayer / DSP
-                p.seek(to: CMTime(seconds: coordinator.player.currentTime, preferredTimescale: 600))
+                await p.seek(to: CMTime(seconds: coordinator.player.currentTime, preferredTimescale: 600))
                 p.play()
                 avVideoPlayer = p
             }
@@ -619,39 +619,51 @@ public struct ModuleSkinPlayerView: View {
 
     public var body: some View {
         let skin = coordinator.currentModuleSkin
+        let accent = MochyTheme.colorFromHex(skin.accentHex) ?? MochyTheme.defaultAccent
         VStack(spacing: 16) {
             ForEach(skin.blocks) { block in
-                switch block.kind {
-                case "cover":
-                    ArtworkImageView(
-                        urlString: coordinator.player.currentItem?.thumbnailURL,
-                        cornerRadius: block.cornerRadius ?? 18
-                    )
-                    .frame(height: block.height ?? 260)
-                    .aspectRatio(1, contentMode: .fit)
-                case "title":
-                    Text(coordinator.player.currentItem?.title ?? "")
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
-                case "visualizer":
-                    HStack(alignment: .bottom, spacing: 3) {
-                        ForEach(Array(coordinator.player.spectrumBins.enumerated()), id: \.offset) { _, mag in
-                            Capsule()
-                                .fill(MochyTheme.colorFromHex(skin.accentHex) ?? MochyTheme.defaultAccent)
-                                .frame(maxWidth: .infinity, height: max(4, CGFloat(mag) * 44))
-                        }
-                    }
-                    .frame(height: block.height ?? 48)
-                case "seekbar":
-                    SeekbarControlView(player: coordinator.player, style: .wavy, accent: MochyTheme.colorFromHex(skin.accentHex) ?? .white)
-                case "transport":
-                    TransportControlsRow(coordinator: coordinator)
-                default:
-                    EmptyView()
-                }
+                renderBlock(block, accent: accent)
             }
         }
         .padding(.horizontal, 24)
+    }
+
+    @ViewBuilder
+    private func renderBlock(_ block: ModuleSkinManifest.Block, accent: Color) -> some View {
+        switch block.kind {
+        case "cover":
+            ArtworkImageView(
+                urlString: coordinator.player.currentItem?.thumbnailURL,
+                cornerRadius: block.cornerRadius ?? 18
+            )
+            .frame(height: block.height ?? 260)
+            .aspectRatio(1, contentMode: .fit)
+        case "title":
+            Text(coordinator.player.currentItem?.title ?? "")
+                .font(.title2.bold())
+                .foregroundStyle(.white)
+        case "visualizer":
+            skinVisualizer(height: block.height ?? 48, accent: accent)
+        case "seekbar":
+            SeekbarControlView(player: coordinator.player, style: .wavy, accent: accent)
+        case "transport":
+            TransportControlsRow(coordinator: coordinator)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func skinVisualizer(height: Double, accent: Color) -> some View {
+        let bins = coordinator.player.spectrumBins
+        return HStack(alignment: .bottom, spacing: 3) {
+            ForEach(0..<bins.count, id: \.self) { idx in
+                let barHeight = max(CGFloat(4), CGFloat(bins[idx]) * CGFloat(44))
+                Capsule()
+                    .fill(accent)
+                    .frame(maxWidth: .infinity, height: barHeight)
+            }
+        }
+        .frame(height: height)
     }
 }
 
