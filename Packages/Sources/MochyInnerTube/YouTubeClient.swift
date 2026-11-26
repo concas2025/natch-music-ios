@@ -176,10 +176,10 @@ public struct YouTubeClient: Sendable, Equatable {
         deviceMake: "Samsung",
         deviceModel: "UKS9800",
         friendlyName: "TV (Samsung)",
-        apiOrigin: originYouTube,
         loginSupported: true,
         loginRequired: true,
-        useSignatureTimestamp: true
+        useSignatureTimestamp: true,
+        apiOrigin: originYouTube
     )
 
     public static let tvHTML5Downgraded = YouTubeClient(
@@ -188,10 +188,10 @@ public struct YouTubeClient: Sendable, Equatable {
         clientId: "7",
         userAgent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
         friendlyName: "TV (older)",
-        apiOrigin: originYouTube,
         loginSupported: true,
         loginRequired: true,
-        useSignatureTimestamp: true
+        useSignatureTimestamp: true,
+        apiOrigin: originYouTube
     )
 
     public static let webEmbeddedPlayer = YouTubeClient(
@@ -200,11 +200,11 @@ public struct YouTubeClient: Sendable, Equatable {
         clientId: "56",
         userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)",
         friendlyName: "Embedded player",
-        apiOrigin: originYouTube,
         loginSupported: true,
         loginRequired: true,
         useSignatureTimestamp: true,
-        isEmbedded: true
+        isEmbedded: true,
+        apiOrigin: originYouTube
     )
 
     public static let tvHTML5SimplyEmbeddedPlayer = YouTubeClient(
@@ -339,13 +339,13 @@ public struct YouTubeClient: Sendable, Equatable {
         deviceMake: "Apple",
         deviceModel: "RealityDevice17,1",
         friendlyName: "visionOS",
+        loginSupported: false,
+        useSignatureTimestamp: false,
         apiOrigin: originYouTube,
         apiFormatVersion: "2",
         clientScreen: "WATCH",
         platform: "MOBILE",
-        ownVisitorId: true,
-        loginSupported: false,
-        useSignatureTimestamp: false
+        ownVisitorId: true
     )
 
     public static let iPadOS = YouTubeClient(
@@ -357,10 +357,10 @@ public struct YouTubeClient: Sendable, Equatable {
         osVersion: "17.7.10.21H450",
         deviceMake: "Apple",
         deviceModel: "iPad7,6",
+        packageName: "com.google.ios.youtube",
         friendlyName: "iPadOS",
         loginSupported: false,
-        useSignatureTimestamp: false,
-        packageName: "com.google.ios.youtube"
+        useSignatureTimestamp: false
     )
 
     // MARK: - Resolution Chains (matching YTPlayerUtils.kt)
