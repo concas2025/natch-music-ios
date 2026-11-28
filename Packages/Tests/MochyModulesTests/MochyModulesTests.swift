@@ -164,7 +164,8 @@ final class MochyModulesTests: XCTestCase {
                 qualityBadge: "FLAC · 16-bit / 44.1 kHz"
             )
         )
-        let routerWithPostFallback = SourceModulesRouter(youtubeResolver: failingYT, modules: [monoFallback, slowOrNil])
+        let emptySaavn = StubModule(id: "jiosaavn", displayName: "Saavn", stream: nil)
+        let routerWithPostFallback = SourceModulesRouter(youtubeResolver: failingYT, modules: [monoFallback, emptySaavn])
         let postFallbackStream = try await routerWithPostFallback.resolve(
             track: ModuleTrack(id: "emMR03tG2CE", title: "Hãy Trao Cho Anh", artist: "Sơn Tùng M-TP"),
             sourceOrder: ["youtube", "monochrome", "jiosaavn"]
