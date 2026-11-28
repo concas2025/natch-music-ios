@@ -120,6 +120,9 @@ public final class AppCoordinator {
     public var isSignedInToYouTube: Bool = false
     public var syncStatusMessage: String?
     public var canUndoLastSync: Bool = false
+    public var playingFromLabel: String = "Recommendations"
+    public var dislikedSongIds: Set<String> = []
+    public var menuToastMessage: String?
 
     public var activeProgress: CGFloat {
         isPlayerExpanded ? max(0, min(1, 1 - playerDragProgress)) : max(0, min(1, playerDragProgress))
@@ -138,7 +141,7 @@ public final class AppCoordinator {
         let visitor = SecretVault.get(.ytmVisitorData)
         let dataSync = SecretVault.get(.ytmDataSyncId)
         let yt = InnerTubeClient(
-            locale: YouTubeLocale(),
+            locale: YouTubeLocale(gl: settings.countryCode, hl: settings.languageCode),
             cookie: cookie,
             visitorData: visitor,
             dataSyncId: dataSync
@@ -331,11 +334,7 @@ public final class AppCoordinator {
 
     public func loadHomeFeedIfNeeded() async {
         guard homeSections.isEmpty, !isLoadingHome else { return }
-        isLoadingHome = true
-        defer { isLoadingHome = false }
-        if let sections = try? await innerTube.browseHome() {
-            self.homeSections = sections
-        }
+        await reloadHomeFeed()
     }
 
     public func updateSuggestions(for query: String) async {
@@ -363,7 +362,10 @@ public final class AppCoordinator {
         }
     }
 
-    public func playTrack(_ track: YTTrackItem, queueContext: [YTTrackItem]? = nil) {
+    public func playTrack(_ track: YTTrackItem, queueContext: [YTTrackItem]? = nil, sourceLabel: String? = nil) {
+        if let sourceLabel, !sourceLabel.isEmpty {
+            playingFromLabel = sourceLabel
+        }
         let items = (queueContext ?? [track]).map(PlaybackItem.init(ytTrack:))
         let startIdx = queueContext?.firstIndex(where: { $0.id == track.id }) ?? 0
         player.playQueue(items, startIndex: startIdx)
@@ -725,6 +727,7 @@ public final class AppCoordinator {
         await innerTube.updateAuth(cookie: cookie, visitorData: visitorData, dataSyncId: dataSyncId)
         isSignedInToYouTube = !cookie.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         syncStatusMessage = isSignedInToYouTube ? "Signed in to YouTube Music." : "Signed out."
+        await reloadHomeFeed()
     }
 
     public func signOutYouTube() async {
@@ -734,6 +737,7 @@ public final class AppCoordinator {
         await innerTube.updateAuth(cookie: nil, visitorData: guestVisitor, dataSyncId: nil)
         isSignedInToYouTube = false
         syncStatusMessage = "Signed out of YouTube Music."
+        await reloadHomeFeed()
     }
 
     public func runYouTubeLibrarySync() async {
@@ -817,6 +821,130 @@ public final class AppCoordinator {
         }
         try? database.upsertSong(song, artists: artists)
         refreshLocalLibrary()
+    }
+
+    public func reloadHomeFeed() async {
+        isLoadingHome = true
+        defer { isLoadingHome = false }
+        let topArtists = (try? database.fetchTopArtists(limit: 5))?.map(\.artist.name) ?? []
+        let sections = await innerTube.loadRichHomeFeed(
+            isSignedIn: isSignedInToYouTube,
+            topLocalArtists: topArtists,
+            countryCode: settings.countryCode,
+            languageCode: settings.languageCode
+        )
+        if !sections.isEmpty {
+            homeSections = sections
+        }
+    }
+
+    public func toggleDislikeCurrentTrack() {
+        guard let item = player.currentItem else { return }
+        if dislikedSongIds.contains(item.id) {
+            dislikedSongIds.remove(item.id)
+            showMenuToast("Removed dislike")
+        } else {
+            dislikedSongIds.insert(item.id)
+            if isLiked(songId: item.id) {
+                toggleLike(songId: item.id)
+            }
+            let trackId = item.id
+            Task { try? await syncManager.setRemoteLikeStatus(videoId: trackId, liked: false) }
+            showMenuToast("Disliked · Skipping next")
+            player.skipNext()
+        }
+    }
+
+    public func startRadioForCurrentTrack() async {
+        guard let item = player.currentItem else { return }
+        showMenuToast("Starting radio...")
+        let radioTracks = (try? await innerTube.nextQueue(videoId: item.id)) ?? []
+        let playbackItems = radioTracks.map(PlaybackItem.init(ytTrack:))
+        guard !playbackItems.isEmpty else {
+            showMenuToast("Couldn't start radio")
+            return
+        }
+        playingFromLabel = "Radio · \(item.title)"
+        player.playQueue(playbackItems, startIndex: 0, playlistId: "RDAMVM\(item.id)")
+    }
+
+    public func addCurrentTrackToPlaylist(playlistId: String) {
+        guard let item = player.currentItem else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        if (try? database.fetchSong(id: item.id)) == nil {
+            let song = SongEntity(
+                id: item.id,
+                title: item.title,
+                duration: item.durationSeconds ?? -1,
+                thumbnailUrl: ThumbnailURLUpgrader.upgrade(item.thumbnailURL, size: 720),
+                albumName: item.album,
+                dateModified: nowMs,
+                inLibrary: nowMs
+            )
+            let artist = ArtistEntity(id: "yt-a-\(item.artist.lowercased())", name: item.artist, thumbnailUrl: song.thumbnailUrl)
+            try? database.upsertSong(song, artists: [artist])
+        }
+        try? database.addSongToPlaylist(playlistId: playlistId, songId: item.id)
+        refreshLocalLibrary()
+        showMenuToast("Added to playlist")
+    }
+
+    public func downloadCurrentTrackToCache() async {
+        guard let item = player.currentItem else { return }
+        if downloadedSongIds.contains(item.id) {
+            showMenuToast("Already cached offline")
+            return
+        }
+        showMenuToast("Caching offline...")
+        if let localURL = await player.localAudioFileURLForCurrentTrack(),
+           let data = try? Data(contentsOf: localURL), !data.isEmpty {
+            let ext = localURL.pathExtension.isEmpty ? "m4a" : localURL.pathExtension
+            try? await player.chunkCache.markCompleted(mediaId: item.id, fileExtension: ext, fullFileData: data)
+            await refreshDownloadedState()
+            showMenuToast("Saved for offline playback")
+        } else {
+            showMenuToast("Play track briefly to cache")
+        }
+    }
+
+    public func clearCacheForCurrentTrack() async {
+        guard let item = player.currentItem else { return }
+        await player.chunkCache.removeMedia(mediaId: item.id)
+        await refreshDownloadedState()
+        showMenuToast("Removed from audio cache")
+    }
+
+    public func openInAppSearch(query: String) {
+        isPlayerExpanded = false
+        playerDragProgress = 0
+        searchQuery = query
+        selectedTab = .search
+        searchFocusTrigger += 1
+        Task { await runSearch(query: query) }
+    }
+
+    public func buildCurrentTrackDiagnosticLog() -> String {
+        let item = player.currentItem
+        return [
+            "Title: \(item?.title ?? "—")",
+            "Artist: \(item?.artist ?? "—")",
+            "Track ID: \(item?.id ?? "—")",
+            "Source: \(player.activeSourceLabel.isEmpty ? "—" : player.activeSourceLabel)",
+            "Quality: \(player.activeQualityBadge.isEmpty ? "—" : player.activeQualityBadge)",
+            "Position: \(Int(player.currentTime))s / \(Int(player.duration))s",
+            "Locale: \(settings.languageCode)-\(settings.countryCode)",
+            "Last Error: \(player.lastError ?? "None")"
+        ].joined(separator: "\n")
+    }
+
+    public func showMenuToast(_ message: String) {
+        menuToastMessage = message
+        Task {
+            try? await Task.sleep(for: .seconds(2.2))
+            if self.menuToastMessage == message {
+                self.menuToastMessage = nil
+            }
+        }
     }
 
     private func updatePalette(from urlString: String?) async {

@@ -228,7 +228,7 @@ public struct RootShellView: View {
             HStack(spacing: 12) {
                 ArtworkImageView(urlString: item.thumbnailURL, cornerRadius: 10)
                     .frame(width: 44, height: 44)
-                    .matchedGeometryEffect(id: "activeCoverArt", in: coverNamespace, isSource: !coordinator.isPlayerExpanded)
+                    .clipped()
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)

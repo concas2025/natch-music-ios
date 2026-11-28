@@ -385,6 +385,75 @@ final class MochyInnerTubeTests: XCTestCase {
         let typeofJsc = ctx.evaluateScript("typeof jsc")?.toString()
         XCTAssertEqual(typeofJsc, "function")
     }
+
+    func testVietnamDefaultLocaleAndAcceptLanguageHeader() async throws {
+        let locale = YouTubeLocale()
+        XCTAssertEqual(locale.gl, "VN")
+        XCTAssertEqual(locale.hl, "vi")
+
+        let client = InnerTubeClient(locale: locale)
+        struct EmptyBody: Encodable, Sendable {}
+        let request = try await client.buildRequest(
+            endpoint: "browse",
+            client: .metadataClient,
+            body: EmptyBody(),
+            setLogin: false
+        )
+        XCTAssertTrue(request.value(forHTTPHeaderField: "Accept-Language")?.contains("vi-VN") == true)
+    }
+
+    func testExtractHomeSectionsClassifiesKindsAndMetadata() {
+        let mockJSON: [String: Any] = [
+            "contents": [
+                "singleColumnBrowseResultsRenderer": [
+                    "tabs": [[
+                        "tabRenderer": [
+                            "content": [
+                                "sectionListRenderer": [
+                                    "contents": [
+                                        [
+                                            "musicCarouselShelfRenderer": [
+                                                "header": [
+                                                    "musicCarouselShelfBasicHeaderRenderer": [
+                                                        "title": ["runs": [["text": "Music Videos for You"]]],
+                                                        "strapline": ["runs": [["text": "Top V-Pop MV"]]],
+                                                    ]
+                                                ],
+                                                "contents": [[
+                                                    "musicTwoRowItemRenderer": [
+                                                        "title": ["runs": [["text": "Đừng Làm Trái Tim Anh Đau"]]],
+                                                        "subtitle": ["runs": [["text": "Sơn Tùng M-TP • 2024"]]],
+                                                        "navigationEndpoint": [
+                                                            "watchEndpoint": [
+                                                                "videoId": "abC12345",
+                                                                "watchEndpointMusicSupportedConfigs": [
+                                                                    "watchEndpointMusicConfig": [
+                                                                        "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                                                                    ]
+                                                                ]
+                                                            ]
+                                                        ]
+                                                    ]
+                                                ]]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]]
+                ]
+            ]
+        ]
+
+        let sections = InnerTubeParser.extractHomeSections(from: mockJSON)
+        XCTAssertEqual(sections.count, 1)
+        XCTAssertEqual(sections[0].kind, .musicVideos)
+        XCTAssertEqual(sections[0].subtitle, "Top V-Pop MV")
+        XCTAssertEqual(sections[0].items.first?.id, "abC12345")
+        XCTAssertEqual(sections[0].items.first?.year, "2024")
+        XCTAssertEqual(sections[0].items.first?.isVideo, true)
+    }
 }
 
 private final class LockedBox<T>: @unchecked Sendable {

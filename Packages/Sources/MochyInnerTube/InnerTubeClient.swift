@@ -70,6 +70,15 @@ public actor InnerTubeClient {
         self.dataSyncId = dataSyncId
     }
 
+    public func updateLocale(countryCode: String, languageCode: String) {
+        let gl = countryCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hl = languageCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.locale = YouTubeLocale(
+            gl: gl.isEmpty ? "VN" : gl.uppercased(),
+            hl: hl.isEmpty ? "vi" : hl.lowercased()
+        )
+    }
+
     public func resolvedVisitorId(for client: YouTubeClient) async -> String? {
         if !client.ownVisitorId {
             return visitorData
@@ -212,7 +221,10 @@ public actor InnerTubeClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        let acceptLang = locale.hl == "en"
+            ? "en-\(locale.gl),en;q=0.9"
+            : "\(locale.hl)-\(locale.gl),\(locale.hl);q=0.9,en-US;q=0.7,en;q=0.6"
+        request.setValue(acceptLang, forHTTPHeaderField: "Accept-Language")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue(client.apiFormatVersion, forHTTPHeaderField: "X-Goog-Api-Format-Version")
         request.setValue(client.clientId, forHTTPHeaderField: "X-YouTube-Client-Name")

@@ -77,7 +77,7 @@ public struct HomeScreen: View {
                             VStack(alignment: .leading, spacing: 26) {
                                 recentlyPlayedSection
                                 mostPlayedSection
-                                moreLikeSection
+                                historySection
                                 feedCarousels
                                 speedDialSection
 
@@ -408,58 +408,60 @@ public struct HomeScreen: View {
         }
     }
 
-    // MARK: - More Like [Artist] Shelf
+    // MARK: - 3-Row History Columns (1:1 Mochy Image 10)
 
     @ViewBuilder
-    private var moreLikeSection: some View {
-        let anchor = featuredArtistInfo
-        let tracks = coordinator.homeSections.dropFirst().first?.items ?? []
-        if let anchor, !tracks.isEmpty {
+    private var historySection: some View {
+        let items = Array(recentDisplayTracks.prefix(12))
+        if items.count >= 3 {
+            let chunked = stride(from: 0, to: items.count, by: 3).map {
+                Array(items[$0..<min($0 + 3, items.count)])
+            }
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    ArtworkImageView(urlString: anchor.thumbnailURL, cornerRadius: 19)
-                        .frame(width: 38, height: 38)
-                        .clipShape(Circle())
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("More like")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.62))
-                        Text(anchor.name)
-                            .font(.title3.weight(.bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white.opacity(0.55))
-                    Spacer()
-                }
-
+                sectionHeader("History")
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 14) {
-                        ForEach(tracks) { track in
-                            Button {
-                                coordinator.playTrack(track, queueContext: tracks)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 7) {
-                                    ArtworkImageView(
-                                        urlString: track.thumbnailURL,
-                                        cornerRadius: coordinator.settings.thumbnailCornerRadius,
-                                        targetSize: 720
-                                    )
-                                    .frame(width: 152, height: 152)
-                                    Text(track.title)
-                                        .font(.subheadline.weight(.bold))
-                                        .foregroundStyle(.white)
-                                        .lineLimit(1)
-                                    Text(track.artistDisplay)
-                                        .font(.caption)
-                                        .foregroundStyle(.white.opacity(0.58))
-                                        .lineLimit(1)
+                    HStack(alignment: .top, spacing: 16) {
+                        ForEach(Array(chunked.enumerated()), id: \.offset) { _, col in
+                            VStack(alignment: .leading, spacing: 12) {
+                                ForEach(col) { track in
+                                    let isActive = coordinator.player.currentItem?.id == track.id
+                                    Button {
+                                        coordinator.playTrack(track, queueContext: items, sourceLabel: "History")
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            ZStack {
+                                                ArtworkImageView(
+                                                    urlString: track.thumbnailURL,
+                                                    cornerRadius: 8,
+                                                    targetSize: 300
+                                                )
+                                                .frame(width: 52, height: 52)
+                                                if isActive {
+                                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                        .fill(.black.opacity(0.45))
+                                                        .frame(width: 52, height: 52)
+                                                    Image(systemName: "play.fill")
+                                                        .font(.caption.bold())
+                                                        .foregroundStyle(.white)
+                                                }
+                                            }
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(track.title)
+                                                    .font(.subheadline.weight(.semibold))
+                                                    .foregroundStyle(.white)
+                                                    .lineLimit(1)
+                                                Text(track.artistDisplay)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.white.opacity(0.55))
+                                                    .lineLimit(1)
+                                            }
+                                            Spacer(minLength: 0)
+                                        }
+                                        .frame(width: 248, alignment: .leading)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .frame(width: 152, alignment: .leading)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -467,42 +469,371 @@ public struct HomeScreen: View {
         }
     }
 
-    // MARK: - Remaining Home Feed Carousels & Speed Dial
+    // MARK: - Rich Home Feed Carousels (1:1 Mochy Visual Templates Images 9–13)
 
     @ViewBuilder
     private var feedCarousels: some View {
-        ForEach(coordinator.homeSections.dropFirst(2)) { section in
+        let sectionsToRender: [YTHomeSection] = {
+            if coordinator.recentlyPlayedSongs.isEmpty && coordinator.mostPlayedSongs.isEmpty {
+                return Array(coordinator.homeSections.dropFirst())
+            }
+            return coordinator.homeSections
+        }()
+
+        ForEach(sectionsToRender) { section in
             if !section.items.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    sectionHeader(section.title)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 14) {
-                            ForEach(section.items) { track in
-                                Button {
-                                    coordinator.playTrack(track, queueContext: section.items)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 7) {
-                                        ArtworkImageView(
-                                            urlString: track.thumbnailURL,
-                                            cornerRadius: coordinator.settings.thumbnailCornerRadius,
-                                            targetSize: 720
-                                        )
-                                        .frame(width: 148, height: 148)
-                                        Text(track.title)
-                                            .font(.subheadline.weight(.bold))
-                                            .foregroundStyle(.white)
-                                            .lineLimit(1)
-                                        Text(track.artistDisplay)
-                                            .font(.caption)
-                                            .foregroundStyle(.white.opacity(0.58))
-                                            .lineLimit(1)
+                switch section.kind {
+                case .artistSimilar:
+                    artistSimilarSection(section)
+                case .moreLikeArtist:
+                    moreLikeArtistSection(section)
+                case .musicVideos, .liveShows:
+                    largePosterSection(section)
+                case .becauseGenre, .trySomethingNew:
+                    eyebrowCarouselSection(section)
+                case .newFromArtists:
+                    newReleasesSection(section)
+                case .speedDial:
+                    sectionSpeedDialGrid(section)
+                case .columns3:
+                    columns3Section(section)
+                case .standard:
+                    standardCarouselSection(section)
+                }
+            }
+        }
+
+        if sectionsToRender.isEmpty, let anchor = featuredArtistInfo,
+           let fallbackTracks = coordinator.homeSections.dropFirst().first?.items, !fallbackTracks.isEmpty {
+            moreLikeArtistSection(YTHomeSection(
+                id: "more-like-fallback",
+                title: anchor.name,
+                subtitle: "MORE LIKE",
+                avatarURL: anchor.thumbnailURL,
+                kind: .moreLikeArtist,
+                items: fallbackTracks
+            ))
+        }
+    }
+
+    private func artistSimilarSection(_ section: YTHomeSection) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(section.title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.58))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    let featured = section.items.prefix(4)
+                    Button {
+                        if let first = section.items.first {
+                            coordinator.playTrack(first, queueContext: section.items, sourceLabel: section.subtitle ?? section.title)
+                        }
+                    } label: {
+                        ZStack(alignment: .bottomLeading) {
+                            ArtworkImageView(
+                                urlString: section.avatarURL ?? featured.first?.thumbnailURL,
+                                cornerRadius: 20,
+                                targetSize: 720
+                            )
+                            .frame(width: 268, height: 310)
+                            .clipped()
+
+                            LinearGradient(
+                                colors: [.clear, .black.opacity(0.25), .black.opacity(0.88)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 6) {
+                                    ForEach(Array(featured.dropFirst().prefix(3))) { subTrack in
+                                        ArtworkImageView(urlString: subTrack.thumbnailURL, cornerRadius: 8, targetSize: 300)
+                                            .frame(width: 44, height: 44)
+                                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.white.opacity(0.22), lineWidth: 0.7))
                                     }
-                                    .frame(width: 148, alignment: .leading)
+                                }
+                                Text(section.subtitle ?? "Similar Mix")
+                                    .font(.headline.weight(.bold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                            }
+                            .padding(16)
+                        }
+                        .frame(width: 268, height: 310)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    ForEach(Array(section.items.dropFirst().prefix(6))) { track in
+                        Button {
+                            coordinator.playTrack(track, queueContext: section.items, sourceLabel: section.subtitle ?? section.title)
+                        } label: {
+                            ZStack(alignment: .bottomLeading) {
+                                ArtworkImageView(
+                                    urlString: track.thumbnailURL,
+                                    cornerRadius: 20,
+                                    targetSize: 720
+                                )
+                                .frame(width: 210, height: 310)
+                                .clipped()
+
+                                LinearGradient(
+                                    colors: [.clear, .black.opacity(0.84)],
+                                    startPoint: .center,
+                                    endPoint: .bottom
+                                )
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(track.title)
+                                        .font(.headline.weight(.bold))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                    Text(track.artistDisplay)
+                                        .font(.caption)
+                                        .foregroundStyle(.white.opacity(0.72))
+                                        .lineLimit(1)
+                                }
+                                .padding(14)
+                            }
+                            .frame(width: 210, height: 310)
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func moreLikeArtistSection(_ section: YTHomeSection) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ArtworkImageView(
+                    urlString: section.avatarURL ?? section.items.first?.thumbnailURL,
+                    cornerRadius: 19,
+                    targetSize: 300
+                )
+                .frame(width: 38, height: 38)
+                .clipShape(Circle())
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text((section.subtitle ?? "MORE LIKE").uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+                    Text(section.title)
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+            }
+
+            horizontalTrackRow(section.items, cardSize: 152, sourceLabel: "More like \(section.title)")
+        }
+    }
+
+    private func largePosterSection(_ section: YTHomeSection) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(section.title)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    ForEach(section.items) { track in
+                        Button {
+                            coordinator.playTrack(track, queueContext: section.items, sourceLabel: section.title)
+                        } label: {
+                            ZStack(alignment: .topLeading) {
+                                ArtworkImageView(
+                                    urlString: track.thumbnailURL,
+                                    cornerRadius: 18,
+                                    targetSize: 720
+                                )
+                                .frame(width: 260, height: 288)
+                                .clipped()
+
+                                LinearGradient(
+                                    colors: [.black.opacity(0.78), .black.opacity(0.25), .clear],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(track.title)
+                                        .font(.title3.weight(.heavy))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    Text(track.artistDisplay)
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.white.opacity(0.76))
+                                        .lineLimit(1)
+                                }
+                                .padding(16)
+                            }
+                            .frame(width: 260, height: 288)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func eyebrowCarouselSection(_ section: YTHomeSection) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                if let sub = section.subtitle, !sub.isEmpty {
+                    Text(sub.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+                }
+                sectionHeader(section.title)
+            }
+            horizontalTrackRow(section.items, cardSize: 152, sourceLabel: section.title)
+        }
+    }
+
+    private func newReleasesSection(_ section: YTHomeSection) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(section.title)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(section.items) { track in
+                        Button {
+                            coordinator.playTrack(track, queueContext: section.items, sourceLabel: section.title)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ArtworkImageView(
+                                    urlString: track.thumbnailURL,
+                                    cornerRadius: coordinator.settings.thumbnailCornerRadius,
+                                    targetSize: 720
+                                )
+                                .frame(width: 152, height: 152)
+
+                                Text(track.title)
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+
+                                Text("\(track.year ?? "2025") • \(track.artistDisplay)")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.58))
+                                    .lineLimit(1)
+                            }
+                            .frame(width: 152, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func columns3Section(_ section: YTHomeSection) -> some View {
+        let items = Array(section.items.prefix(12))
+        let chunked = stride(from: 0, to: items.count, by: 3).map {
+            Array(items[$0..<min($0 + 3, items.count)])
+        }
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(section.title)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 16) {
+                    ForEach(Array(chunked.enumerated()), id: \.offset) { _, col in
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(col) { track in
+                                Button {
+                                    coordinator.playTrack(track, queueContext: items, sourceLabel: section.title)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        ArtworkImageView(urlString: track.thumbnailURL, cornerRadius: 8, targetSize: 300)
+                                            .frame(width: 52, height: 52)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(track.title)
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(.white)
+                                                .lineLimit(1)
+                                            Text(track.artistDisplay)
+                                                .font(.caption)
+                                                .foregroundStyle(.white.opacity(0.55))
+                                                .lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .frame(width: 248, alignment: .leading)
                                 }
                                 .buttonStyle(.plain)
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    private func sectionSpeedDialGrid(_ section: YTHomeSection) -> some View {
+        let cols = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(section.title)
+            LazyVGrid(columns: cols, spacing: 10) {
+                ForEach(section.items.prefix(9)) { track in
+                    Button {
+                        coordinator.playTrack(track, queueContext: section.items, sourceLabel: section.title)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ArtworkImageView(urlString: track.thumbnailURL, cornerRadius: 12, targetSize: 360)
+                                .aspectRatio(1, contentMode: .fit)
+                            Text(track.title)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func standardCarouselSection(_ section: YTHomeSection) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(section.title)
+            horizontalTrackRow(section.items, cardSize: 148, sourceLabel: section.title)
+        }
+    }
+
+    private func horizontalTrackRow(_ tracks: [YTTrackItem], cardSize: CGFloat, sourceLabel: String) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(tracks) { track in
+                    Button {
+                        coordinator.playTrack(track, queueContext: tracks, sourceLabel: sourceLabel)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ArtworkImageView(
+                                urlString: track.thumbnailURL,
+                                cornerRadius: coordinator.settings.thumbnailCornerRadius,
+                                targetSize: 720
+                            )
+                            .frame(width: cardSize, height: cardSize)
+
+                            Text(track.title)
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+
+                            Text(track.artistDisplay)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.58))
+                                .lineLimit(1)
+                        }
+                        .frame(width: cardSize, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }

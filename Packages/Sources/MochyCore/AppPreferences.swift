@@ -364,6 +364,12 @@ public final class AppSettings {
     public var webModuleURLs: [String] {
         didSet { defaults.set(webModuleURLs, forKey: PreferenceKeys.webModuleURLs) }
     }
+    public var countryCode: String {
+        didSet { defaults.set(countryCode, forKey: PreferenceKeys.countryCode) }
+    }
+    public var languageCode: String {
+        didSet { defaults.set(languageCode, forKey: PreferenceKeys.languageCode) }
+    }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -384,7 +390,7 @@ public final class AppSettings {
         self.thumbnailCornerRadius = savedRadius ?? 14.0
         self.playerControlsShift = defaults.double(forKey: PreferenceKeys.playerControlsShift)
         self.playerCardGrowth = defaults.double(forKey: PreferenceKeys.playerCardGrowth)
-        self.playerCoverStyle = Self.decodeEnum(defaults, key: PreferenceKeys.playerCoverStyle, fallback: .classic)
+        self.playerCoverStyle = Self.decodeEnum(defaults, key: PreferenceKeys.playerCoverStyle, fallback: .full)
         self.lyricsMotionStyle = Self.decodeEnum(defaults, key: PreferenceKeys.lyricsMotionStyle, fallback: .glide)
         self.crossmixMode = Self.decodeEnum(defaults, key: PreferenceKeys.crossmixMode, fallback: .classic)
         let savedDuration = defaults.integer(forKey: PreferenceKeys.crossmixDurationMs)
@@ -429,6 +435,10 @@ public final class AppSettings {
         self.profileAvatarPath = defaults.string(forKey: PreferenceKeys.profileAvatarPath)
         self.customMonochromeServers = defaults.stringArray(forKey: PreferenceKeys.customMonochromeServers) ?? []
         self.webModuleURLs = defaults.stringArray(forKey: PreferenceKeys.webModuleURLs) ?? []
+        let savedCountry = defaults.string(forKey: PreferenceKeys.countryCode)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.countryCode = (savedCountry?.isEmpty == false ? savedCountry! : "VN")
+        let savedLang = defaults.string(forKey: PreferenceKeys.languageCode)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.languageCode = (savedLang?.isEmpty == false ? savedLang! : "vi")
 
         let schemaVer = defaults.integer(forKey: PreferenceKeys.settingsSchemaVersion)
         if schemaVer < 2 {
@@ -441,6 +451,13 @@ public final class AppSettings {
                 defaults.set(self.sourceOrder, forKey: PreferenceKeys.sourceOrder)
             }
             defaults.set(2, forKey: PreferenceKeys.settingsSchemaVersion)
+        }
+        if schemaVer < 3 {
+            if self.playerCoverStyle == .classic {
+                self.playerCoverStyle = .full
+                defaults.set(PlayerCoverStyle.full.rawValue, forKey: PreferenceKeys.playerCoverStyle)
+            }
+            defaults.set(3, forKey: PreferenceKeys.settingsSchemaVersion)
         }
     }
 

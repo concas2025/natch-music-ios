@@ -10,12 +10,15 @@ public struct FullPlayerContainerView: View {
 
     @State private var showStylePicker = false
     @State private var showAudioLab = false
-    @State private var showLyricsSheet = false
+    @State private var showLyricsOverlay = false
+    @State private var showLyricsOffsetControls = false
     @State private var showShareStudio = false
     @State private var showQueueSheet = false
     @State private var showStreamInfo = false
     @State private var showSleepTimer = false
     @State private var showPlayerStudio = false
+    @State private var showActionMenu = false
+    @State private var showAddToPlaylist = false
 
     public init(
         coordinator: AppCoordinator,
@@ -34,21 +37,71 @@ public struct FullPlayerContainerView: View {
             playerStyleContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            topChromeBar
-                .padding(.horizontal, 18)
-                .padding(.top, 52)
+            if coordinator.settings.playerStyle != .flagship {
+                nonFlagshipTopChrome
+                    .padding(.horizontal, 18)
+                    .padding(.top, 52)
+            }
+
+            if showLyricsOverlay {
+                LyricsStageView(
+                    coordinator: coordinator,
+                    showControls: $showLyricsOffsetControls,
+                    onDismiss: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                            showLyricsOverlay = false
+                            showLyricsOffsetControls = false
+                        }
+                    }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(20)
+            }
+
+            if showActionMenu {
+                PlayerActionMenuOverlay(
+                    coordinator: coordinator,
+                    isPresented: $showActionMenu,
+                    onOpenAudioLab: { showAudioLab = true },
+                    onOpenStylePicker: { showStylePicker = true },
+                    onOpenAddToPlaylist: { showAddToPlaylist = true },
+                    onOpenStreamInfo: { showStreamInfo = true },
+                    onOpenSleepTimer: { showSleepTimer = true },
+                    onOpenLyricsWithOffset: {
+                        showLyricsOffsetControls = true
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                            showLyricsOverlay = true
+                        }
+                    },
+                    onOpenShare: { showShareStudio = true }
+                )
+                .zIndex(30)
+            }
+
+            if let toast = coordinator.menuToastMessage, !toast.isEmpty {
+                Text(toast)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.7))
+                    .padding(.top, 56)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(40)
+            }
         }
         .background(.black)
         .ignoresSafeArea()
+        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: showLyricsOverlay)
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: showActionMenu)
         .sheet(isPresented: $showStylePicker) {
             PlayerSelectorSheet(coordinator: coordinator)
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showAudioLab) {
             AudioLabView(coordinator: coordinator)
-        }
-        .sheet(isPresented: $showLyricsSheet) {
-            LyricsStageView(coordinator: coordinator)
         }
         .sheet(isPresented: $showShareStudio) {
             SongShareStudioView(coordinator: coordinator)
@@ -65,33 +118,47 @@ public struct FullPlayerContainerView: View {
             SleepTimerSheet(coordinator: coordinator)
                 .presentationDetents([.fraction(0.4)])
         }
+        .sheet(isPresented: $showAddToPlaylist) {
+            AddToPlaylistPickerSheet(coordinator: coordinator)
+                .presentationDetents([.medium, .large])
+        }
     }
 
     @ViewBuilder
     private var playerStyleContent: some View {
+        let openLyrics: () -> Void = {
+            showLyricsOffsetControls = false
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                showLyricsOverlay = true
+            }
+        }
         switch coordinator.settings.playerStyle {
         case .flagship:
             FlagshipPlayerView(
                 coordinator: coordinator,
                 coverNamespace: coverNamespace,
                 showPlayerStudio: $showPlayerStudio,
-                onOpenLyrics: { showLyricsSheet = true },
+                onCollapse: onCollapse,
+                onOpenLyrics: openLyrics,
                 onOpenQueue: { showQueueSheet = true },
-                onOpenAudioLab: { showAudioLab = true },
-                onOpenShare: { showShareStudio = true },
+                onOpenActionMenu: {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                        showActionMenu = true
+                    }
+                },
                 onOpenStreamInfo: { showStreamInfo = true }
             )
         case .turntable:
             TurntablePlayerView(
                 coordinator: coordinator,
-                onOpenLyrics: { showLyricsSheet = true },
+                onOpenLyrics: openLyrics,
                 onOpenQueue: { showQueueSheet = true },
                 onOpenAudioLab: { showAudioLab = true }
             )
         case .video:
             VideoPlayerView(
                 coordinator: coordinator,
-                onOpenLyrics: { showLyricsSheet = true },
+                onOpenLyrics: openLyrics,
                 onOpenQueue: { showQueueSheet = true }
             )
         case .ipod:
@@ -99,14 +166,14 @@ public struct FullPlayerContainerView: View {
         case .poster:
             PosterPlayerView(
                 coordinator: coordinator,
-                onOpenLyrics: { showLyricsSheet = true }
+                onOpenLyrics: openLyrics
             )
         case .timeline:
             TimelinePlayerView(coordinator: coordinator)
         case .lyrics:
             LyricsStylePlayerView(
                 coordinator: coordinator,
-                onOpenFullLyrics: { showLyricsSheet = true }
+                onOpenFullLyrics: openLyrics
             )
         case .bedside:
             BedsidePlayerView(coordinator: coordinator)
@@ -116,12 +183,12 @@ public struct FullPlayerContainerView: View {
             ModuleSkinPlayerView(
                 coordinator: coordinator,
                 onOpenQueue: { showQueueSheet = true },
-                onOpenLyrics: { showLyricsSheet = true }
+                onOpenLyrics: openLyrics
             )
         }
     }
 
-    private var topChromeBar: some View {
+    private var nonFlagshipTopChrome: some View {
         HStack(spacing: 10) {
             Button(action: onCollapse) {
                 Image(systemName: "chevron.down")
@@ -131,81 +198,10 @@ public struct FullPlayerContainerView: View {
                     .background(.black.opacity(0.32))
                     .clipShape(Circle())
             }
-
             Spacer()
-
             Button {
-                showStreamInfo = true
-            } label: {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(coordinator.settings.audioPassEnabled ? Color.green : Color.white.opacity(0.72))
-                        .frame(width: 6, height: 6)
-                    Text(coordinator.player.activeQualityBadge.isEmpty ? coordinator.settings.playerStyle.displayName : coordinator.player.activeQualityBadge)
-                        .font(.caption2.weight(.semibold))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(.white.opacity(0.92))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.black.opacity(0.36))
-                .clipShape(Capsule())
-            }
-
-            Spacer()
-
-            if coordinator.settings.playerStyle == .flagship {
-                Button {
-                    withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
-                        showPlayerStudio.toggle()
-                    }
-                } label: {
-                    Image(systemName: showPlayerStudio ? "checkmark.circle.fill" : "wand.and.stars")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(showPlayerStudio ? MochyTheme.defaultAccent : .white)
-                        .frame(width: 34, height: 34)
-                        .background(.black.opacity(0.32))
-                        .clipShape(Circle())
-                }
-            }
-
-            Menu {
-                Button {
-                    showStylePicker = true
-                } label: {
-                    Label("Player Style (\(coordinator.settings.playerStyle.displayName))", systemImage: "sparkles.rectangle.stack")
-                }
-                Button {
-                    showAudioLab = true
-                } label: {
-                    Label("Audio Lab & 3D Stage", systemImage: "slider.vertical.3")
-                }
-                Button {
-                    showQueueSheet = true
-                } label: {
-                    Label("Up Next Queue (\(coordinator.player.queue.count))", systemImage: "list.bullet")
-                }
-                Button {
-                    showLyricsSheet = true
-                } label: {
-                    Label("Lyrics Stage", systemImage: "quote.bubble")
-                }
-                Button {
-                    showShareStudio = true
-                } label: {
-                    Label("Share Card & Video Studio", systemImage: "square.and.arrow.up")
-                }
-                Button {
-                    showSleepTimer = true
-                } label: {
-                    let suffix = coordinator.player.sleepTimerRemainingSeconds.map { " (\($0 / 60)m)" } ?? ""
-                    Label("Sleep Timer\(suffix)", systemImage: "moon.zzz")
-                }
-                Divider()
-                Button {
-                    coordinator.pinCurrentToSpeedDial()
-                } label: {
-                    Label("Pin to Speed Dial", systemImage: "pin")
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                    showActionMenu = true
                 }
             } label: {
                 Image(systemName: "ellipsis")

@@ -12,6 +12,9 @@ public struct YTTrackItem: Sendable, Equatable, Identifiable, Codable {
     public let thumbnailURL: String?
     public let explicit: Bool
     public let isVideo: Bool
+    public let subtitle: String?
+    public let year: String?
+    public let browseId: String?
 
     public init(
         id: String,
@@ -21,7 +24,10 @@ public struct YTTrackItem: Sendable, Equatable, Identifiable, Codable {
         durationSeconds: Int? = nil,
         thumbnailURL: String? = nil,
         explicit: Bool = false,
-        isVideo: Bool = false
+        isVideo: Bool = false,
+        subtitle: String? = nil,
+        year: String? = nil,
+        browseId: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -31,6 +37,9 @@ public struct YTTrackItem: Sendable, Equatable, Identifiable, Codable {
         self.thumbnailURL = thumbnailURL
         self.explicit = explicit
         self.isVideo = isVideo
+        self.subtitle = subtitle
+        self.year = year
+        self.browseId = browseId
     }
 
     public var artistDisplay: String {
@@ -38,15 +47,55 @@ public struct YTTrackItem: Sendable, Equatable, Identifiable, Codable {
     }
 }
 
+public enum YTHomeSectionKind: String, Sendable, Equatable, Codable {
+    case standard
+    case columns3
+    case artistSimilar
+    case moreLikeArtist
+    case musicVideos
+    case becauseGenre
+    case trySomethingNew
+    case liveShows
+    case newFromArtists
+    case speedDial
+}
+
 public struct YTHomeSection: Sendable, Equatable, Identifiable {
     public let id: String
     public let title: String
+    public let subtitle: String?
+    public let avatarURL: String?
+    public let kind: YTHomeSectionKind
     public let items: [YTTrackItem]
 
-    public init(id: String, title: String, items: [YTTrackItem]) {
+    public init(
+        id: String,
+        title: String,
+        subtitle: String? = nil,
+        avatarURL: String? = nil,
+        kind: YTHomeSectionKind = .standard,
+        items: [YTTrackItem]
+    ) {
         self.id = id
         self.title = title
+        self.subtitle = subtitle
+        self.avatarURL = avatarURL
+        self.kind = kind
         self.items = items
+    }
+}
+
+public struct YTArtistSummary: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let thumbnailURL: String?
+    public let subscribers: String?
+
+    public init(id: String, name: String, thumbnailURL: String? = nil, subscribers: String? = nil) {
+        self.id = id
+        self.name = name
+        self.thumbnailURL = thumbnailURL
+        self.subscribers = subscribers
     }
 }
 
@@ -142,7 +191,11 @@ extension InnerTubeClient {
         return InnerTubeParser.extractSuggestions(from: root)
     }
 
-    public func browseHome(browseId: String = "FEmusic_home", setLogin: Bool = false) async throws -> [YTHomeSection] {
+    public func browseHome(
+        browseId: String = "FEmusic_home",
+        setLogin: Bool = false,
+        maxPages: Int = 2
+    ) async throws -> [YTHomeSection] {
         let client = YouTubeClient.metadataClient
         let visitor = await resolvedVisitorId(for: client)
         let syncId = setLogin ? dataSyncId : nil
@@ -154,12 +207,232 @@ extension InnerTubeClient {
         )
         let data = try await rawPost(endpoint: "browse", client: client, body: body, setLogin: setLogin)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
-        let sections = InnerTubeParser.extractHomeSections(from: root)
+        var sections = InnerTubeParser.extractHomeSections(from: root)
+        var continuation = InnerTubeParser.extractContinuationToken(from: root)
+        var page = 1
+
+        while page < max(1, maxPages), let token = continuation, !token.isEmpty {
+            let contBody = BrowseBody(
+                context: client.toContext(locale: locale, visitorData: visitor, dataSyncId: syncId),
+                browseId: nil,
+                params: nil,
+                continuation: token
+            )
+            guard let nextData = try? await rawPost(endpoint: "browse", client: client, body: contBody, setLogin: setLogin),
+                  let nextRoot = try? JSONSerialization.jsonObject(with: nextData) as? [String: Any] else {
+                break
+            }
+            let moreSections = InnerTubeParser.extractHomeSections(from: nextRoot)
+            if moreSections.isEmpty { break }
+            sections.append(contentsOf: moreSections)
+            continuation = InnerTubeParser.extractContinuationToken(from: nextRoot)
+            page += 1
+        }
+
         if !sections.isEmpty {
             return sections
         }
         let flat = InnerTubeParser.extractTracks(from: root)
         return flat.isEmpty ? [] : [YTHomeSection(id: browseId, title: "Library", items: flat)]
+    }
+
+    public func browseChartsArtists() async throws -> (artists: [YTArtistSummary], playlists: [YTPlaylistSummary]) {
+        let client = YouTubeClient.metadataClient
+        let visitor = await resolvedVisitorId(for: client)
+        let body = BrowseBody(
+            context: client.toContext(locale: locale, visitorData: visitor, dataSyncId: nil),
+            browseId: "FEmusic_charts",
+            params: nil,
+            continuation: nil
+        )
+        let data = try await rawPost(endpoint: "browse", client: client, body: body, setLogin: false)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ([], [])
+        }
+        return (InnerTubeParser.extractArtists(from: root), InnerTubeParser.extractPlaylists(from: root))
+    }
+
+    /// Builds a rich multi-shelf Home feed:
+    /// - Signed in (Gmail): uses authenticated `FEmusic_home` (3 pages) + fills any missing visual shelves from library/charts.
+    /// - Signed out (Guest): 100% localized (default VN) real YouTube Music home, charts, V-Pop/Indie/Rap, MV, Live Shows & New Releases.
+    public func loadRichHomeFeed(
+        isSignedIn: Bool,
+        topLocalArtists: [String] = [],
+        countryCode: String = "VN",
+        languageCode: String = "vi"
+    ) async -> [YTHomeSection] {
+        updateLocale(countryCode: countryCode, languageCode: languageCode)
+        let upperGL = countryCode.uppercased()
+
+        async let homeTask: [YTHomeSection] = (try? await browseHome(
+            browseId: "FEmusic_home",
+            setLogin: isSignedIn,
+            maxPages: isSignedIn ? 3 : 2
+        )) ?? []
+        async let chartsTask: (artists: [YTArtistSummary], playlists: [YTPlaylistSummary]) =
+            (try? await browseChartsArtists()) ?? ([], [])
+
+        let fetchedHome = await homeTask
+        let charts = await chartsTask
+
+        let mvPlaylistId: String? = {
+            if upperGL == "VN" {
+                return charts.playlists.first(where: { $0.title.localizedCaseInsensitiveContains("video") })?.id
+                    ?? "VLPL4fGSI1pDJn57DkisEwlIpcs9FAt5yudJ"
+            }
+            return charts.playlists.first?.id
+        }()
+
+        let primaryArtist = topLocalArtists.first
+            ?? charts.artists.first?.name
+            ?? (upperGL == "VN" ? "Sơn Tùng M-TP" : "Trending")
+        let primaryArtistAvatar = charts.artists.first(where: {
+            $0.name.localizedCaseInsensitiveContains(primaryArtist) || primaryArtist.localizedCaseInsensitiveContains($0.name)
+        })?.thumbnailURL ?? charts.artists.first?.thumbnailURL
+
+        let secondArtist = topLocalArtists.dropFirst().first
+            ?? charts.artists.dropFirst().first?.name
+            ?? (upperGL == "VN" ? "Vũ." : primaryArtist)
+
+        let genreFocus = upperGL == "VN" ? "V-Pop & Indie" : "Pop & Indie"
+        let newDiscovery = upperGL == "VN" ? "Rap & Chill Việt" : "Electronic & Alt"
+
+        async let mvTask = fetchMusicVideos(playlistId: mvPlaylistId, upperGL: upperGL)
+
+        async let similarArtistTracksTask: [YTTrackItem] =
+            (try? await searchTracks(query: "\(primaryArtist) songs")) ?? []
+        async let moreLikeTracksTask: [YTTrackItem] =
+            (try? await searchTracks(query: "\(secondArtist) hits")) ?? []
+        async let genreTracksTask: [YTTrackItem] =
+            (try? await searchTracks(query: upperGL == "VN" ? "nhạc trẻ vpop hay nhất hiện nay" : "top pop indie hits")) ?? []
+        async let discoveryTracksTask: [YTTrackItem] =
+            (try? await searchTracks(query: upperGL == "VN" ? "indie rap việt chill mới" : "indie chill new music")) ?? []
+        async let liveShowsTask: [YTTrackItem] =
+            (try? await searchTracks(query: upperGL == "VN" ? "live session concert việt nam" : "live concert acoustic session", params: "EgWKAQIQAWoKEAMQBBAJEAoQBQ%3D%3D")) ?? []
+        async let newReleasesTask: [YTTrackItem] =
+            (try? await searchTracks(query: upperGL == "VN" ? "nhạc mới phát hành vpop 2025 2026" : "new music releases 2025 2026")) ?? []
+
+        let (mvTracks, similarTracks, moreLikeTracks, genreTracks, discoveryTracks, liveTracks, newTracks) = await (
+            mvTask,
+            similarArtistTracksTask,
+            moreLikeTracksTask,
+            genreTracksTask,
+            discoveryTracksTask,
+            liveShowsTask,
+            newReleasesTask
+        )
+
+        var result: [YTHomeSection] = []
+        var usedKinds = Set<YTHomeSectionKind>()
+        var seenTitles = Set<String>()
+
+        for section in fetchedHome {
+            let key = section.title.lowercased()
+            if seenTitles.insert(key).inserted {
+                result.append(section)
+                usedKinds.insert(section.kind)
+            }
+        }
+
+        if !usedKinds.contains(.artistSimilar) && !similarTracks.isEmpty {
+            let artistThumb = primaryArtistAvatar ?? similarTracks.first?.thumbnailURL
+            result.append(YTHomeSection(
+                id: "artist-similar-\(primaryArtist)",
+                title: "Artist List",
+                subtitle: "Similar to \(primaryArtist)",
+                avatarURL: artistThumb,
+                kind: .artistSimilar,
+                items: Array(similarTracks.prefix(12))
+            ))
+        }
+
+        if !usedKinds.contains(.moreLikeArtist) && !moreLikeTracks.isEmpty {
+            let secondAvatar = charts.artists.dropFirst().first?.thumbnailURL ?? moreLikeTracks.first?.thumbnailURL
+            result.append(YTHomeSection(
+                id: "more-like-\(secondArtist)",
+                title: secondArtist,
+                subtitle: "MORE LIKE",
+                avatarURL: secondAvatar,
+                kind: .moreLikeArtist,
+                items: Array(moreLikeTracks.prefix(12))
+            ))
+        }
+
+        if !usedKinds.contains(.musicVideos) && !mvTracks.isEmpty {
+            result.append(YTHomeSection(
+                id: "music-videos-\(upperGL)",
+                title: "Music Videos for You",
+                subtitle: upperGL == "VN" ? "Top V-Pop & Trending MV" : "Trending Video Mix",
+                kind: .musicVideos,
+                items: Array(mvTracks.prefix(12))
+            ))
+        }
+
+        if !usedKinds.contains(.becauseGenre) && !genreTracks.isEmpty {
+            result.append(YTHomeSection(
+                id: "because-genre-\(upperGL)",
+                title: genreFocus,
+                subtitle: "BECAUSE YOU LISTEN TO",
+                kind: .becauseGenre,
+                items: Array(genreTracks.prefix(12))
+            ))
+        }
+
+        if !usedKinds.contains(.trySomethingNew) && !discoveryTracks.isEmpty {
+            result.append(YTHomeSection(
+                id: "try-new-\(upperGL)",
+                title: newDiscovery,
+                subtitle: "TRY SOMETHING NEW",
+                kind: .trySomethingNew,
+                items: Array(discoveryTracks.prefix(12))
+            ))
+        }
+
+        if !usedKinds.contains(.liveShows) && !liveTracks.isEmpty {
+            result.append(YTHomeSection(
+                id: "live-shows-\(upperGL)",
+                title: "Live Shows",
+                subtitle: "Acoustic & Stage Performances",
+                kind: .liveShows,
+                items: Array(liveTracks.prefix(10))
+            ))
+        }
+
+        if !usedKinds.contains(.newFromArtists) && !newTracks.isEmpty {
+            result.append(YTHomeSection(
+                id: "new-releases-\(upperGL)",
+                title: "New from your artists",
+                subtitle: upperGL == "VN" ? "Latest Releases" : "Fresh Drops",
+                kind: .newFromArtists,
+                items: Array(newTracks.prefix(12))
+            ))
+        }
+
+        return result
+    }
+
+    private func fetchMusicVideos(playlistId: String?, upperGL: String) async -> [YTTrackItem] {
+        if let playlistId,
+           let col = try? await browsePlaylist(playlistId: playlistId, setLogin: false),
+           !col.tracks.isEmpty {
+            return col.tracks.map { item in
+                YTTrackItem(
+                    id: item.id,
+                    title: item.title,
+                    artists: item.artists,
+                    album: item.album,
+                    durationSeconds: item.durationSeconds,
+                    thumbnailURL: item.thumbnailURL,
+                    explicit: item.explicit,
+                    isVideo: true,
+                    subtitle: item.subtitle,
+                    year: item.year,
+                    browseId: item.browseId
+                )
+            }
+        }
+        let mvQuery = upperGL == "VN" ? "official music video vpop 2025" : "official music video 2025"
+        return (try? await searchTracks(query: mvQuery, params: "EgWKAQIQAWoKEAMQBBAJEAoQBQ%3D%3D")) ?? []
     }
 
     public func browsePlaylist(playlistId: String, setLogin: Bool = false) async throws -> YTBrowseCollection {
@@ -375,19 +648,90 @@ public enum InnerTubeParser {
         return results
     }
 
+    public static func extractContinuationToken(from root: Any) -> String? {
+        var token: String?
+        walkDictionaries(root) { dict in
+            guard token == nil else { return }
+            if let cont = dict["nextContinuationData"] as? [String: Any],
+               let t = cont["continuation"] as? String,
+               !t.isEmpty {
+                token = t
+            } else if let cmd = dict["continuationCommand"] as? [String: Any],
+                      let t = cmd["token"] as? String,
+                      !t.isEmpty {
+                token = t
+            }
+        }
+        return token
+    }
+
+    public static func extractArtists(from root: Any) -> [YTArtistSummary] {
+        var out: [YTArtistSummary] = []
+        var seen = Set<String>()
+        walkDictionaries(root) { dict in
+            if let responsive = dict["musicResponsiveListItemRenderer"] as? [String: Any],
+               let nav = responsive["navigationEndpoint"] as? [String: Any],
+               let browse = nav["browseEndpoint"] as? [String: Any],
+               let browseId = browse["browseId"] as? String,
+               browseId.hasPrefix("UC"),
+               seen.insert(browseId).inserted {
+                let cols = responsive["flexColumns"] as? [[String: Any]] ?? []
+                let name = colText(cols, index: 0) ?? "Artist"
+                let subs = colText(cols, index: 1)
+                let rawThumb = ((((responsive["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+                out.append(YTArtistSummary(id: browseId, name: name, thumbnailURL: ThumbnailURLUpgrader.upgrade(rawThumb), subscribers: subs))
+            } else if let twoRow = dict["musicTwoRowItemRenderer"] as? [String: Any],
+                      let nav = twoRow["navigationEndpoint"] as? [String: Any],
+                      let browse = nav["browseEndpoint"] as? [String: Any],
+                      let browseId = browse["browseId"] as? String,
+                      browseId.hasPrefix("UC"),
+                      seen.insert(browseId).inserted {
+                let name = (twoRow["title"] as? [String: Any]).flatMap { runsText($0) } ?? "Artist"
+                let subs = (twoRow["subtitle"] as? [String: Any]).flatMap { runsText($0) }
+                let rawThumb = ((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+                out.append(YTArtistSummary(id: browseId, name: name, thumbnailURL: ThumbnailURLUpgrader.upgrade(rawThumb), subscribers: subs))
+            }
+        }
+        return out
+    }
+
     public static func extractHomeSections(from root: Any) -> [YTHomeSection] {
         var sections: [YTHomeSection] = []
         walkDictionaries(root) { dict in
             guard let carousel = dict["musicCarouselShelfRenderer"] as? [String: Any] else { return }
-            let headerTitle = (((carousel["header"] as? [String: Any])?["musicCarouselShelfBasicHeaderRenderer"] as? [String: Any])?["title"] as? [String: Any])
-                .flatMap { runsText($0) } ?? "Recommended"
+            let header = (carousel["header"] as? [String: Any])?["musicCarouselShelfBasicHeaderRenderer"] as? [String: Any]
+            let headerTitle = (header?["title"] as? [String: Any]).flatMap { runsText($0) } ?? "Recommended"
+            let headerStrapline = (header?["strapline"] as? [String: Any]).flatMap { runsText($0) }
+            let rawAvatar = ((((header?["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+            let headerAvatar = ThumbnailURLUpgrader.upgrade(rawAvatar)
             let contents = carousel["contents"] as? [[String: Any]] ?? []
             let tracks = contents.compactMap { parseTrack($0) }
             if !tracks.isEmpty {
-                sections.append(YTHomeSection(id: "\(headerTitle)-\(sections.count)", title: headerTitle, items: tracks))
+                let kind = classifySectionKind(title: headerTitle, strapline: headerStrapline)
+                sections.append(YTHomeSection(
+                    id: "\(headerTitle)-\(sections.count)",
+                    title: headerTitle,
+                    subtitle: headerStrapline,
+                    avatarURL: headerAvatar,
+                    kind: kind,
+                    items: tracks
+                ))
             }
         }
         return sections
+    }
+
+    private static func classifySectionKind(title: String, strapline: String?) -> YTHomeSectionKind {
+        let joined = "\(title) \(strapline ?? "")".lowercased()
+        if joined.contains("speed dial") || joined.contains("chọn nhanh") { return .speedDial }
+        if joined.contains("music video") || joined.contains("video nhạc") { return .musicVideos }
+        if joined.contains("live") || joined.contains("trực tiếp") { return .liveShows }
+        if joined.contains("similar to") || joined.contains("tương tự") { return .artistSimilar }
+        if joined.contains("more like") || joined.contains("giống như") { return .moreLikeArtist }
+        if joined.contains("because you") || joined.contains("vì bạn") { return .becauseGenre }
+        if joined.contains("try something") || joined.contains("thử nghe") { return .trySomethingNew }
+        if joined.contains("new release") || joined.contains("new from") || joined.contains("phát hành mới") || joined.contains("mới") { return .newFromArtists }
+        return .standard
     }
 
     public static func extractTracks(from root: Any) -> [YTTrackItem] {
@@ -414,14 +758,16 @@ public enum InnerTubeParser {
                 title: title,
                 artists: artists,
                 durationSeconds: parseDurationSeconds(lengthStr),
-                thumbnailURL: thumbs
+                thumbnailURL: thumbs,
+                subtitle: artistText.isEmpty ? nil : artistText
             )
         }
 
         if let responsive = dict["musicResponsiveListItemRenderer"] as? [String: Any] {
-            let videoId = (((responsive["playlistItemData"] as? [String: Any])?["videoId"] as? String)
-                ?? ((((responsive["overlay"] as? [String: Any])?["musicItemThumbnailOverlayRenderer"] as? [String: Any])?["content"] as? [String: Any])?["musicPlayButtonRenderer"] as? [String: Any])
-                .flatMap { (($0["playNavigationEndpoint"] as? [String: Any])?["watchEndpoint"] as? [String: Any])?["videoId"] as? String })
+            let watchEndpoint = (((responsive["overlay"] as? [String: Any])?["musicItemThumbnailOverlayRenderer"] as? [String: Any])?["content"] as? [String: Any])?["musicPlayButtonRenderer"] as? [String: Any]
+            let endpointWatch = (watchEndpoint?["playNavigationEndpoint"] as? [String: Any])?["watchEndpoint"] as? [String: Any]
+            let videoId = (responsive["playlistItemData"] as? [String: Any])?["videoId"] as? String
+                ?? endpointWatch?["videoId"] as? String
             guard let videoId, !videoId.isEmpty else { return nil }
 
             let cols = responsive["flexColumns"] as? [[String: Any]] ?? []
@@ -436,27 +782,48 @@ public enum InnerTubeParser {
                               let txt = first["text"] as? [String: Any] else { return nil }
                         return parseDurationSeconds(runsText(txt))
                     }
+            let yearMatch = parts.first(where: { $0.trimmingCharacters(in: .whitespaces).count == 4 && Int($0.trimmingCharacters(in: .whitespaces)) != nil })
+            let videoType = (((endpointWatch?["watchEndpointMusicSupportedConfigs"] as? [String: Any])?["watchEndpointMusicConfig"] as? [String: Any])?["musicVideoType"] as? String) ?? ""
+            let isMV = videoType.contains("OMV") || videoType.contains("UGC")
             let thumbs = ThumbnailURLUpgrader.upgrade(((((responsive["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String)
             return YTTrackItem(
                 id: videoId,
                 title: title,
                 artists: artists,
                 durationSeconds: duration,
-                thumbnailURL: thumbs
+                thumbnailURL: thumbs,
+                isVideo: isMV,
+                subtitle: subtitle.isEmpty ? nil : subtitle,
+                year: yearMatch?.trimmingCharacters(in: .whitespaces)
             )
         }
 
-        if let twoRow = dict["musicTwoRowItemRenderer"] as? [String: Any],
-           let watch = ((twoRow["navigationEndpoint"] as? [String: Any])?["watchEndpoint"] as? [String: Any]),
-           let videoId = watch["videoId"] as? String {
+        if let twoRow = dict["musicTwoRowItemRenderer"] as? [String: Any] {
+            let nav = twoRow["navigationEndpoint"] as? [String: Any]
+            let watch = nav?["watchEndpoint"] as? [String: Any]
+            let browse = nav?["browseEndpoint"] as? [String: Any]
+            let videoId = (watch?["videoId"] as? String)
+                ?? ((((twoRow["thumbnailOverlay"] as? [String: Any])?["musicItemThumbnailOverlayRenderer"] as? [String: Any])?["content"] as? [String: Any])?["musicPlayButtonRenderer"] as? [String: Any])
+                    .flatMap { (($0["playNavigationEndpoint"] as? [String: Any])?["watchEndpoint"] as? [String: Any])?["videoId"] as? String }
+            let browseId = browse?["browseId"] as? String
+            guard let itemId = videoId ?? browseId, !itemId.isEmpty else { return nil }
+
             let title = (twoRow["title"] as? [String: Any]).flatMap { runsText($0) } ?? "Unknown"
             let subtitle = (twoRow["subtitle"] as? [String: Any]).flatMap { runsText($0) } ?? ""
+            let parts = subtitle.components(separatedBy: " • ")
+            let yearMatch = parts.first(where: { $0.trimmingCharacters(in: .whitespaces).count == 4 && Int($0.trimmingCharacters(in: .whitespaces)) != nil })
+            let videoType = (((watch?["watchEndpointMusicSupportedConfigs"] as? [String: Any])?["watchEndpointMusicConfig"] as? [String: Any])?["musicVideoType"] as? String) ?? ""
+            let isMV = videoType.contains("OMV") || videoType.contains("UGC")
             let thumbs = ThumbnailURLUpgrader.upgrade(((((twoRow["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String)
             return YTTrackItem(
-                id: videoId,
+                id: itemId,
                 title: title,
-                artists: splitArtists(subtitle),
-                thumbnailURL: thumbs
+                artists: splitArtists(parts.last == yearMatch ? (parts.first ?? subtitle) : subtitle),
+                thumbnailURL: thumbs,
+                isVideo: isMV,
+                subtitle: subtitle.isEmpty ? nil : subtitle,
+                year: yearMatch?.trimmingCharacters(in: .whitespaces),
+                browseId: browseId
             )
         }
         return nil

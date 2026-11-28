@@ -1,9 +1,13 @@
+import AVFoundation
 import AVKit
 import MochyAudio
 import MochyCore
 import SwiftUI
 #if os(iOS) && canImport(UIKit)
 import UIKit
+#endif
+#if os(iOS) && canImport(MediaPlayer)
+import MediaPlayer
 #endif
 
 // MARK: - Formatting Helper
@@ -155,10 +159,16 @@ public struct MochySeekbarView: View {
 public struct TransportControlsRow: View {
     @Bindable public var coordinator: AppCoordinator
     public var onOpenQueue: (() -> Void)?
+    public var flagshipMinimal: Bool
 
-    public init(coordinator: AppCoordinator, onOpenQueue: (() -> Void)? = nil) {
+    public init(
+        coordinator: AppCoordinator,
+        onOpenQueue: (() -> Void)? = nil,
+        flagshipMinimal: Bool = false
+    ) {
         self.coordinator = coordinator
         self.onOpenQueue = onOpenQueue
+        self.flagshipMinimal = flagshipMinimal
     }
 
     public var body: some View {
@@ -208,19 +218,22 @@ public struct TransportControlsRow: View {
             #endif
         } label: {
             ZStack {
-                Circle()
-                    .fill(.white)
-                    .frame(width: 68, height: 68)
-                    .shadow(color: .black.opacity(0.32), radius: 10, y: 4)
+                if !flagshipMinimal {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 68, height: 68)
+                        .shadow(color: .black.opacity(0.32), radius: 10, y: 4)
+                }
                 if coordinator.player.isBuffering {
-                    ProgressView().tint(.black)
+                    ProgressView().tint(flagshipMinimal ? .white : .black)
                 } else {
                     Image(systemName: coordinator.player.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 27, weight: .bold))
-                        .foregroundStyle(.black)
+                        .font(.system(size: flagshipMinimal ? 38 : 27, weight: .bold))
+                        .foregroundStyle(flagshipMinimal ? .white : .black)
                         .offset(x: coordinator.player.isPlaying ? 0 : 2)
                 }
             }
+            .frame(width: 68, height: 68)
         }
         .buttonStyle(.plain)
     }
@@ -228,9 +241,9 @@ public struct TransportControlsRow: View {
     private func skipButton(systemName: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 26, weight: .semibold))
+                .font(.system(size: flagshipMinimal ? 30 : 26, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
+                .frame(width: 48, height: 48)
         }
         .buttonStyle(.plain)
     }
@@ -557,3 +570,191 @@ private struct AirPlayRoutePickerRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }
 #endif
+
+// MARK: - Marquee Title / Artist Text
+
+public struct MochyMarqueeText: View {
+    public let text: String
+    public let font: Font
+    public let color: Color
+
+    @State private var textWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+    @State private var offsetX: CGFloat = 0
+
+    public init(_ text: String, font: Font, color: Color = .white) {
+        self.text = text
+        self.font = font
+        self.color = color
+    }
+
+    public var body: some View {
+        let shouldScroll = textWidth > containerWidth + 8 && containerWidth > 0
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Text(text)
+                    .font(font)
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .background(
+                        GeometryReader { inner in
+                            Color.clear
+                                .onAppear { textWidth = inner.size.width }
+                                .onChange(of: text) { _, _ in
+                                    textWidth = inner.size.width
+                                    offsetX = 0
+                                }
+                        }
+                    )
+                    .offset(x: shouldScroll ? offsetX : 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+            .onAppear { containerWidth = geo.size.width }
+            .onChange(of: geo.size.width) { _, newW in containerWidth = newW }
+        }
+        .frame(height: 26)
+        .task(id: "\(text)-\(Int(textWidth))-\(Int(containerWidth))") {
+            offsetX = 0
+            guard textWidth > containerWidth + 8, containerWidth > 0 else { return }
+            let delta = -(textWidth - containerWidth + 16)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.8))
+                guard !Task.isCancelled else { return }
+                withAnimation(.linear(duration: Double(abs(delta)) / 28.0)) {
+                    offsetX = delta
+                }
+                try? await Task.sleep(for: .seconds(Double(abs(delta)) / 28.0 + 1.4))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.45)) {
+                    offsetX = 0
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Apple Music Slim Volume Bar (Bridged to System Audio Volume on iOS)
+
+public struct MochyVolumeBar: View {
+    @State private var volume: Double = 0.65
+    @State private var isDragging = false
+
+    public init() {}
+
+    public var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "speaker.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.65))
+
+            GeometryReader { geo in
+                let width = max(1, geo.size.width)
+                let trackHeight: CGFloat = isDragging ? 9 : 4.5
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(.white.opacity(0.22))
+                        .frame(height: trackHeight)
+                    Capsule()
+                        .fill(.white.opacity(0.88))
+                        .frame(width: max(4, width * volume), height: trackHeight)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { val in
+                            isDragging = true
+                            let pct = max(0.0, min(1.0, Double(val.location.x / width)))
+                            volume = pct
+                            setSystemVolume(Float(pct))
+                        }
+                        .onEnded { _ in
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                isDragging = false
+                            }
+                        }
+                )
+            }
+            .frame(height: 22)
+
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.65))
+        }
+        .onAppear {
+            volume = Double(currentSystemVolume())
+        }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("AVSystemController_SystemVolumeDidChangeNotification"))) { _ in
+            if !isDragging {
+                volume = Double(currentSystemVolume())
+            }
+        }
+        #endif
+    }
+
+    private func currentSystemVolume() -> Float {
+        #if os(iOS)
+        return AVAudioSession.sharedInstance().outputVolume
+        #else
+        return Float(volume)
+        #endif
+    }
+
+    private func setSystemVolume(_ value: Float) {
+        #if os(iOS) && canImport(MediaPlayer) && canImport(UIKit)
+        SystemVolumeBridge.shared.setVolume(value)
+        #endif
+    }
+}
+
+#if os(iOS) && canImport(MediaPlayer) && canImport(UIKit)
+@MainActor
+private final class SystemVolumeBridge {
+    static let shared = SystemVolumeBridge()
+    private let volumeView = MPVolumeView(frame: .zero)
+
+    func setVolume(_ value: Float) {
+        if let slider = volumeView.subviews.compactMap({ $0 as? UISlider }).first {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                slider.value = value
+            }
+        }
+    }
+}
+#endif
+
+// MARK: - Active Audio Output Device Label
+
+public struct AudioOutputDeviceLabel: View {
+    @State private var portName: String = "Speakers"
+
+    public init() {}
+
+    public var body: some View {
+        Text(portName)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(.white.opacity(0.68))
+            .lineLimit(1)
+            .onAppear { refreshRoute() }
+            #if os(iOS)
+            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { _ in
+                refreshRoute()
+            }
+            #endif
+    }
+
+    private func refreshRoute() {
+        #if os(iOS)
+        if let output = AVAudioSession.sharedInstance().currentRoute.outputs.first {
+            portName = output.portType == .builtInSpeaker ? "iPhone" : output.portName
+        } else {
+            portName = "iPhone"
+        }
+        #else
+        portName = "Mac Audio"
+        #endif
+    }
+}

@@ -213,25 +213,30 @@ public struct ArtworkImageView: View {
 
     public var body: some View {
         let resolvedURL = ThumbnailURLUpgrader.upgrade(urlString, size: targetSize)
-        Group {
-            if let resolvedURL, let url = URL(string: resolvedURL) {
-                if url.isFileURL {
-                    localFileImage(url: url)
-                } else {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case let .success(image):
-                            image.resizable().scaledToFill()
-                        default:
-                            placeholder
+        Color.clear
+            .overlay {
+                if let resolvedURL, let url = URL(string: resolvedURL) {
+                    if url.isFileURL {
+                        localFileImage(url: url)
+                    } else {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case let .success(image):
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            default:
+                                placeholder
+                            }
                         }
                     }
+                } else {
+                    placeholder
                 }
-            } else {
-                placeholder
             }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .clipped()
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
 
     @ViewBuilder

@@ -126,13 +126,16 @@ final class MochyCoreTests: XCTestCase {
     }
 
     @MainActor
-    func testAppSettingsDefaultsAndV2Migration() {
+    func testAppSettingsDefaultsAndV3Migration() {
         let freshSuite = "mochy.test.fresh.\(UUID().uuidString)"
         let freshDefaults = UserDefaults(suiteName: freshSuite)!
         defer { freshDefaults.removePersistentDomain(forName: freshSuite) }
 
         let fresh = AppSettings(defaults: freshDefaults)
         XCTAssertEqual(fresh.seekbarStyle, .default)
+        XCTAssertEqual(fresh.playerCoverStyle, .full)
+        XCTAssertEqual(fresh.countryCode, "VN")
+        XCTAssertEqual(fresh.languageCode, "vi")
         XCTAssertEqual(fresh.sourceOrder, ["youtube", "monochrome", "jiosaavn"])
 
         let legacySuite = "mochy.test.legacy.\(UUID().uuidString)"
@@ -140,10 +143,12 @@ final class MochyCoreTests: XCTestCase {
         defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
 
         legacyDefaults.set(SeekbarStyle.wavy.rawValue, forKey: PreferenceKeys.seekbarStyle)
+        legacyDefaults.set(PlayerCoverStyle.classic.rawValue, forKey: PreferenceKeys.playerCoverStyle)
         legacyDefaults.set(["monochrome", "jiosaavn", "youtube"], forKey: PreferenceKeys.sourceOrder)
 
         let migrated = AppSettings(defaults: legacyDefaults)
         XCTAssertEqual(migrated.seekbarStyle, .default)
+        XCTAssertEqual(migrated.playerCoverStyle, .full)
         XCTAssertEqual(migrated.sourceOrder, ["youtube", "monochrome", "jiosaavn"])
     }
 }

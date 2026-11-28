@@ -4,7 +4,7 @@ public struct YouTubeLocale: Sendable, Equatable {
     public let gl: String
     public let hl: String
 
-    public init(gl: String = "US", hl: String = "en") {
+    public init(gl: String = "VN", hl: String = "vi") {
         self.gl = gl
         self.hl = hl
     }

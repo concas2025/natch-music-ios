@@ -99,87 +99,134 @@ public struct LyricsFlowLayout: Layout {
 /// - Persistent `lyricsOffset` DB controls + 1-tap `Auto-Sync` via `LyricsAutoSync`
 public struct LyricsStageView: View {
     @Bindable public var coordinator: AppCoordinator
-    @Environment(\.dismiss) private var dismiss
+    @Binding public var showControls: Bool
+    public var onDismiss: () -> Void
 
     @State private var isAutoSyncing = false
     @State private var autoSyncMessage: String?
+    @State private var dragOffsetY: CGFloat = 0
+
+    public init(
+        coordinator: AppCoordinator,
+        showControls: Binding<Bool> = .constant(false),
+        onDismiss: @escaping () -> Void = {}
+    ) {
+        self.coordinator = coordinator
+        self._showControls = showControls
+        self.onDismiss = onDismiss
+    }
 
     public var body: some View {
         let accent = coordinator.paletteColors.first ?? MochyTheme.defaultAccent
+        let item = coordinator.player.currentItem
 
-        NavigationStack {
-            ZStack {
-                AmbientBackdropView(
-                    colors: coordinator.paletteColors,
-                    style: .ambient,
-                    blurQuality: coordinator.settings.blurQuality,
-                    isPaused: !coordinator.player.isPlaying
+        ZStack {
+            AmbientBackdropView(
+                colors: coordinator.paletteColors,
+                style: .ambient,
+                blurQuality: coordinator.settings.blurQuality,
+                isPaused: !coordinator.player.isPlaying
+            )
+
+            VStack(spacing: 0) {
+                // Drag handle + compact album/title/artist header (1:1 Mochy full-bleed overlay)
+                VStack(spacing: 12) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.42))
+                        .frame(width: 44, height: 4)
+                        .padding(.top, 54)
+
+                    HStack(spacing: 12) {
+                        ArtworkImageView(urlString: item?.thumbnailURL, cornerRadius: 10)
+                            .frame(width: 48, height: 48)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item?.title ?? "Lyrics Stage")
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                            Text(item?.artist ?? "")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.white.opacity(0.72))
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 8)
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 10)
+                        .onChanged { val in
+                            if val.translation.height > 0 {
+                                dragOffsetY = val.translation.height
+                            }
+                        }
+                        .onEnded { val in
+                            if val.translation.height > 110 || val.predictedEndTranslation.height > 180 {
+                                dragOffsetY = 0
+                                onDismiss()
+                            } else {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                    dragOffsetY = 0
+                                }
+                            }
+                        }
                 )
 
-                VStack(spacing: 0) {
-                    if coordinator.isLoadingLyrics {
-                        Spacer()
-                        ProgressView("Fetching synced lyrics...")
-                            .tint(.white)
-                            .foregroundStyle(.white.opacity(0.85))
-                        Spacer()
-                    } else if let doc = coordinator.currentLyrics, !doc.lines.isEmpty {
-                        lyricsScrollBody(doc: doc, accent: accent)
-                    } else {
-                        Spacer()
-                        VStack(spacing: 12) {
-                            Image(systemName: "text.quote")
-                                .font(.system(size: 40))
-                                .foregroundStyle(.white.opacity(0.45))
-                            Text("No lyrics found for this track.")
-                                .font(.headline)
-                                .foregroundStyle(.white.opacity(0.8))
-                            Button("Retry Lookup") {
-                                Task { await coordinator.loadLyricsForCurrentTrack(forceRefresh: true) }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(accent)
-                        }
-                        Spacer()
-                    }
-
-                    lyricsControlDock(accent: accent)
-                }
-            }
-            .navigationTitle(coordinator.player.currentItem?.title ?? "Lyrics Stage")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Menu {
-                        Toggle("Romanization", isOn: $coordinator.settings.lyricsRomanize)
-                        Toggle("AI Translation (\(coordinator.settings.lyricsTranslationLanguage.uppercased()))", isOn: $coordinator.settings.lyricsTranslate)
-                        Picker("Motion Style", selection: $coordinator.settings.lyricsMotionStyle) {
-                            ForEach(LyricsMotionStyle.allCases, id: \.self) { m in
-                                Text(m.rawValue.capitalized).tag(m)
-                            }
-                        }
-                        Divider()
-                        Button("Force Refresh Lyrics") {
+                if coordinator.isLoadingLyrics {
+                    Spacer()
+                    ProgressView("Fetching synced lyrics...")
+                        .tint(.white)
+                        .foregroundStyle(.white.opacity(0.85))
+                    Spacer()
+                } else if let doc = coordinator.currentLyrics, !doc.lines.isEmpty {
+                    lyricsScrollBody(doc: doc, accent: accent)
+                        .mask(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .clear, location: 0.0),
+                                    .init(color: .white, location: 0.08),
+                                    .init(color: .white, location: 0.88),
+                                    .init(color: .clear, location: 1.0),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                } else {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "text.quote")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.white.opacity(0.45))
+                        Text("No lyrics found for this track.")
+                            .font(.headline)
+                            .foregroundStyle(.white.opacity(0.8))
+                        Button("Retry Lookup") {
                             Task { await coordinator.loadLyricsForCurrentTrack(forceRefresh: true) }
                         }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
+                        .buttonStyle(.borderedProminent)
+                        .tint(accent)
                     }
+                    Spacer()
+                }
+
+                if showControls {
+                    lyricsControlDock(accent: accent)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .onChange(of: coordinator.settings.lyricsRomanize) { _, _ in
-                Task { await coordinator.loadLyricsForCurrentTrack() }
-            }
-            .onChange(of: coordinator.settings.lyricsTranslate) { _, _ in
-                Task { await coordinator.loadLyricsForCurrentTrack() }
-            }
         }
+        .ignoresSafeArea()
+        .offset(y: dragOffsetY)
         .preferredColorScheme(.dark)
+        .onChange(of: coordinator.settings.lyricsRomanize) { _, _ in
+            Task { await coordinator.loadLyricsForCurrentTrack() }
+        }
+        .onChange(of: coordinator.settings.lyricsTranslate) { _, _ in
+            Task { await coordinator.loadLyricsForCurrentTrack() }
+        }
     }
 
     private func lyricsScrollBody(doc: LyricsDocument, accent: Color) -> some View {
@@ -337,7 +384,24 @@ public struct LyricsStageView: View {
     }
 
     private func lyricsControlDock(accent: Color) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Toggle("Romanize", isOn: $coordinator.settings.lyricsRomanize)
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                Toggle("Translate (\(coordinator.settings.lyricsTranslationLanguage.uppercased()))", isOn: $coordinator.settings.lyricsTranslate)
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                Spacer()
+                Button("Hide") {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        showControls = false
+                    }
+                }
+                .font(.caption.bold())
+                .foregroundStyle(.white.opacity(0.8))
+            }
+
             if let autoSyncMessage {
                 Text(autoSyncMessage)
                     .font(.caption2.weight(.semibold))
@@ -392,9 +456,10 @@ public struct LyricsStageView: View {
                 .controlSize(.small)
                 .disabled(isAutoSyncing)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .padding(.bottom, 16)
         .background(.ultraThinMaterial)
     }
 }
