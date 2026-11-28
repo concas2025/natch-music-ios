@@ -43,11 +43,15 @@ public struct YouTubeClient: Sendable, Equatable {
     public let ownVisitorId: Bool
 
     public var isNativeApp: Bool {
-        platform != nil
+        platform != nil || isNativeStreamClient
     }
 
     public var isNativeStreamClient: Bool {
         ["IOS", "VISIONOS", "ANDROID", "ANDROID_VR", "ANDROID_CREATOR"].contains(clientName)
+    }
+
+    public var solvesN: Bool {
+        useWebPoTokens || useSignatureTimestamp || Self.accountClients.contains(self)
     }
 
     public init(
@@ -103,9 +107,16 @@ public struct YouTubeClient: Sendable, Equatable {
     public func toContext(
         locale: YouTubeLocale,
         visitorData: String?,
-        dataSyncId: String?
+        dataSyncId: String?,
+        embedVideoId: String? = nil
     ) -> InnerTubeContext {
-        InnerTubeContext(
+        let embedURL: String
+        if let embedVideoId, !embedVideoId.isEmpty {
+            embedURL = "https://www.youtube.com/watch?v=\(embedVideoId)"
+        } else {
+            embedURL = "\(apiOrigin)/"
+        }
+        return InnerTubeContext(
             client: InnerTubeContext.Client(
                 clientName: clientName,
                 clientVersion: clientVersion,
@@ -122,7 +133,7 @@ public struct YouTubeClient: Sendable, Equatable {
                 utcOffsetMinutes: clientScreen != nil ? 0 : nil
             ),
             thirdParty: isEmbedded
-                ? InnerTubeContext.ThirdParty(embedUrl: "\(apiOrigin)/")
+                ? InnerTubeContext.ThirdParty(embedUrl: embedURL)
                 : nil,
             user: InnerTubeContext.User(
                 lockedSafetyMode: false,
@@ -137,7 +148,10 @@ public struct YouTubeClient: Sendable, Equatable {
         clientName: "WEB",
         clientVersion: "2.20260708.00.00",
         clientId: "1",
-        userAgent: userAgentWeb
+        userAgent: userAgentWeb,
+        useSignatureTimestamp: true,
+        useWebPoTokens: true,
+        apiOrigin: originYouTube
     )
 
     public static let webRemix = YouTubeClient(
@@ -221,7 +235,8 @@ public struct YouTubeClient: Sendable, Equatable {
         loginSupported: true,
         loginRequired: false,
         useSignatureTimestamp: true,
-        isEmbedded: true
+        isEmbedded: true,
+        apiOrigin: originYouTube
     )
 
     public static let iOS = YouTubeClient(
@@ -229,7 +244,11 @@ public struct YouTubeClient: Sendable, Equatable {
         clientVersion: "21.03.1",
         clientId: "5",
         userAgent: "com.google.ios.youtube/21.03.1 (iPhone16,2; U; CPU iOS 18_2 like Mac OS X;)",
-        osVersion: "18.2.22C152"
+        osName: "iPhone",
+        osVersion: "18.2.22C152",
+        deviceMake: "Apple",
+        deviceModel: "iPhone16,2",
+        apiOrigin: originYouTube
     )
 
     public static let mobile = YouTubeClient(
@@ -240,7 +259,8 @@ public struct YouTubeClient: Sendable, Equatable {
         osName: "Android",
         osVersion: "11",
         loginSupported: true,
-        useSignatureTimestamp: true
+        useSignatureTimestamp: true,
+        apiOrigin: originYouTube
     )
 
     public static let androidNoSDK = YouTubeClient(
@@ -252,7 +272,8 @@ public struct YouTubeClient: Sendable, Equatable {
         osVersion: "11",
         friendlyName: "Android No SDK",
         loginSupported: false,
-        useSignatureTimestamp: false
+        useSignatureTimestamp: false,
+        apiOrigin: originYouTube
     )
 
     public static let androidVRNoAuth = YouTubeClient(
@@ -261,7 +282,8 @@ public struct YouTubeClient: Sendable, Equatable {
         clientId: "28",
         userAgent: "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12; en_US; Oculus Quest 3; Build/SQ3A.220605.009.A1; Cronet/132.0.6808.3)",
         loginSupported: false,
-        useSignatureTimestamp: false
+        useSignatureTimestamp: false,
+        apiOrigin: originYouTube
     )
 
     public static let androidVR16148 = YouTubeClient(
@@ -279,7 +301,8 @@ public struct YouTubeClient: Sendable, Equatable {
         packageName: "com.google.android.apps.youtube.vr.oculus",
         friendlyName: "Android VR 1.61",
         loginSupported: false,
-        useSignatureTimestamp: false
+        useSignatureTimestamp: false,
+        apiOrigin: originYouTube
     )
 
     public static let androidVR16510 = YouTubeClient(
@@ -296,7 +319,8 @@ public struct YouTubeClient: Sendable, Equatable {
         packageName: "com.google.android.apps.youtube.vr.oculus",
         friendlyName: "Android VR 1.65",
         loginSupported: false,
-        useSignatureTimestamp: false
+        useSignatureTimestamp: false,
+        apiOrigin: originYouTube
     )
 
     public static let androidVR14332 = YouTubeClient(
@@ -314,7 +338,8 @@ public struct YouTubeClient: Sendable, Equatable {
         packageName: "com.google.android.apps.youtube.vr.oculus",
         friendlyName: "Android VR 1.43",
         loginSupported: false,
-        useSignatureTimestamp: false
+        useSignatureTimestamp: false,
+        apiOrigin: originYouTube
     )
 
     public static let androidCreator = YouTubeClient(
@@ -332,7 +357,8 @@ public struct YouTubeClient: Sendable, Equatable {
         packageName: "com.google.android.apps.youtube.creator",
         friendlyName: "Android Studio",
         loginSupported: true,
-        useSignatureTimestamp: true
+        useSignatureTimestamp: true,
+        apiOrigin: originYouTube
     )
 
     public static let visionOS = YouTubeClient(
@@ -366,7 +392,8 @@ public struct YouTubeClient: Sendable, Equatable {
         packageName: "com.google.ios.youtube",
         friendlyName: "iPadOS",
         loginSupported: false,
-        useSignatureTimestamp: false
+        useSignatureTimestamp: false,
+        apiOrigin: originYouTube
     )
 
     // MARK: - Resolution Chains (matching YTPlayerUtils.kt)
@@ -380,18 +407,20 @@ public struct YouTubeClient: Sendable, Equatable {
         tvHTML5Downgraded,
     ]
 
+    /// VISIONOS is #1 because it is the only unauthenticated client serving full uncapped tracks without a PoToken;
+    /// PoToken/cipher web clients follow, while untokened IOS/IPADOS/ANDROID_VR sit last (strictly probed past 1 MiB / lastByte).
     public static let streamFallbackClients: [YouTubeClient] = [
-        iOS,
+        visionOS,
+        webRemix,
+        web,
+        webCreator,
+        tvHTML5SimplyEmbeddedPlayer,
         iPadOS,
+        iOS,
         androidVR14332,
         androidVR16148,
         androidVR16510,
         androidVRNoAuth,
-        visionOS,
-        tvHTML5SimplyEmbeddedPlayer,
-        webRemix,
-        web,
-        webCreator,
         tvHTML5,
         androidCreator,
         mobile,

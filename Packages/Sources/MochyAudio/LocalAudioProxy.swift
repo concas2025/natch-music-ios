@@ -188,6 +188,14 @@ public actor LocalAudioProxy {
         tokenByTrackId.removeAll()
     }
 
+    public func invalidateTrack(_ trackId: String) async {
+        guard let existingToken = tokenByTrackId.removeValue(forKey: trackId),
+              let removed = sessionsByToken.removeValue(forKey: existingToken) else {
+            return
+        }
+        await removed.dispose()
+    }
+
     /// Registers an upstream HTTP/HTTPS stream and returns its local `http://127.0.0.1:<port>/stream/<token>.<ext>` URL.
     public func registerStream(
         _ descriptor: ProxyStreamDescriptor,
@@ -197,9 +205,16 @@ public actor LocalAudioProxy {
 
         if let existingToken = tokenByTrackId[descriptor.trackId],
            let existing = sessionsByToken[existingToken] {
-            await existing.updateDescriptor(descriptor, onRefresh: onRefresh)
-            await existing.startPrefetchIfNeeded()
-            return URL(string: "http://127.0.0.1:\(port)/stream/\(existingToken).\(descriptor.fileExtension)")!
+            let existingMime = await existing.mimeType
+            let existingTotal = await existing.totalBytes
+            if existingMime == descriptor.mimeType && (descriptor.contentLength == nil || descriptor.contentLength == existingTotal) {
+                await existing.updateDescriptor(descriptor, onRefresh: onRefresh)
+                await existing.startPrefetchIfNeeded()
+                return URL(string: "http://127.0.0.1:\(port)/stream/\(existingToken).\(descriptor.fileExtension)")!
+            }
+            sessionsByToken.removeValue(forKey: existingToken)
+            tokenByTrackId.removeValue(forKey: descriptor.trackId)
+            await existing.dispose()
         }
 
         let totalBytes: Int64
@@ -244,7 +259,8 @@ public actor LocalAudioProxy {
         return nil
     }
 
-    /// Extracts YouTube `mn=primary,fallback` failover host URLs when a `googlevideo.com` CDN node stalls.
+    /// Extracts YouTube `mn=primary,fallback` failover host URLs when a `googlevideo.com` CDN node stalls,
+    /// preserving the original `rrN---` shard prefix first before falling back to `rr1---` / `rr2---`.
     public static func buildFailoverURLs(for original: URL) -> [URL] {
         guard let host = original.host?.lowercased(), host.contains("googlevideo.com"),
               var comps = URLComponents(url: original, resolvingAgainstBaseURL: false),
@@ -254,10 +270,19 @@ public actor LocalAudioProxy {
         let nodes = mn.split(separator: ",").map(String.init).filter { !$0.isEmpty }
         guard nodes.count >= 2 else { return [] }
         let fallbackNode = nodes[1]
+
+        var prefixes: [String] = []
+        if let dashRange = host.range(of: "---") {
+            prefixes.append(String(host[..<dashRange.upperBound]))
+        }
+        for p in ["rr1---", "rr2---", "rr3---"] where !prefixes.contains(p) {
+            prefixes.append(p)
+        }
+
         var urls: [URL] = []
-        for prefix in ["rr1---", "rr2---"] {
+        for prefix in prefixes {
             comps.host = "\(prefix)\(fallbackNode).googlevideo.com"
-            if let alt = comps.url, alt != original {
+            if let alt = comps.url, alt != original, !urls.contains(alt) {
                 urls.append(alt)
             }
         }
@@ -265,24 +290,28 @@ public actor LocalAudioProxy {
     }
 
     private func probeContentLength(for descriptor: ProxyStreamDescriptor) async throws -> Int64 {
-        var req = URLRequest(url: descriptor.url)
-        req.httpMethod = "GET"
-        req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        for (k, v) in descriptor.headers {
-            req.setValue(v, forHTTPHeaderField: k)
-        }
-        let (_, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw LocalAudioProxyError.couldNotDetermineContentLength
-        }
-        if let rangeHeader = http.value(forHTTPHeaderField: "Content-Range"),
-           let slashIdx = rangeHeader.lastIndex(of: "/"),
-           let parsedTotal = Int64(rangeHeader[rangeHeader.index(after: slashIdx)...].trimmingCharacters(in: .whitespaces)),
-           parsedTotal > 0 {
-            return parsedTotal
-        }
-        if http.expectedContentLength > 0 {
-            return http.expectedContentLength
+        let candidateURLs = [descriptor.url] + Self.buildFailoverURLs(for: descriptor.url)
+        for url in candidateURLs {
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.timeoutInterval = 4.0
+            req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            for (k, v) in descriptor.headers {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
+            guard let (_, response) = try? await session.data(for: req),
+                  let http = response as? HTTPURLResponse else {
+                continue
+            }
+            if let rangeHeader = http.value(forHTTPHeaderField: "Content-Range"),
+               let slashIdx = rangeHeader.lastIndex(of: "/"),
+               let parsedTotal = Int64(rangeHeader[rangeHeader.index(after: slashIdx)...].trimmingCharacters(in: .whitespaces)),
+               parsedTotal > 0 {
+                return parsedTotal
+            }
+            if http.expectedContentLength > 0 {
+                return http.expectedContentLength
+            }
         }
         throw LocalAudioProxyError.couldNotDetermineContentLength
     }
@@ -704,7 +733,7 @@ private actor DiskStreamSession {
                 do {
                     let (rawData, response) = try await session.data(for: req)
                     guard let http = response as? HTTPURLResponse else { continue }
-                    if http.statusCode == 403 || http.statusCode == 410 {
+                    if http.statusCode == 403 || http.statusCode == 410 || (http.statusCode == 416 && index > 0) {
                         sawAuthExpiry = true
                         break
                     }
@@ -724,6 +753,17 @@ private actor DiskStreamSession {
                     }
 
                     guard writeChunkToDisk(offset: start, data: bytesToWrite) else { return false }
+                    // Pin winning failover / post-302 CDN edge URL so subsequent chunks skip dead mirrors & extra 302 RTTs.
+                    let winningURL = http.url ?? url
+                    if winningURL != descriptor.url {
+                        self.descriptor = ProxyStreamDescriptor(
+                            trackId: descriptor.trackId,
+                            url: winningURL,
+                            headers: descriptor.headers,
+                            mimeType: descriptor.mimeType,
+                            contentLength: descriptor.contentLength
+                        )
+                    }
                     downloadedChunks[index] = true
                     await promoteIfComplete()
                     return true

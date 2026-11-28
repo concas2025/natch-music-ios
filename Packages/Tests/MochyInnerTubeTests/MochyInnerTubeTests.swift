@@ -53,6 +53,33 @@ final class MochyInnerTubeTests: XCTestCase {
         XCTAssertEqual(remixReq.value(forHTTPHeaderField: "Referer"), "https://music.youtube.com/")
         XCTAssertTrue(remixReq.value(forHTTPHeaderField: "Authorization")?.hasPrefix("SAPISIDHASH 1700000000_") == true)
         XCTAssertEqual(remixCtx.user.onBehalfOfUser, "sync-123")
+
+        // Native iOS/Android/AndroidVR clients must talk to www.youtube.com without browser X-Origin / Referer
+        for native in [YouTubeClient.iOS, YouTubeClient.iPadOS, YouTubeClient.androidVR14332, YouTubeClient.mobile] {
+            XCTAssertTrue(native.isNativeApp)
+            XCTAssertEqual(native.apiOrigin, "https://www.youtube.com")
+            let ctx = native.toContext(locale: YouTubeLocale(), visitorData: "v1", dataSyncId: nil)
+            let req = try await client.buildRequest(
+                endpoint: "player",
+                client: native,
+                body: PlayerBody(context: ctx, videoId: "emMR03tG2CE"),
+                setLogin: false,
+                visitorOverride: "v1",
+                timestamp: 1_700_000_000
+            )
+            XCTAssertEqual(req.url?.host, "www.youtube.com")
+            XCTAssertNil(req.value(forHTTPHeaderField: "X-Origin"))
+            XCTAssertNil(req.value(forHTTPHeaderField: "Referer"))
+        }
+
+        // Embedded player context must carry video-specific watch embedUrl
+        let embedCtx = YouTubeClient.tvHTML5SimplyEmbeddedPlayer.toContext(
+            locale: YouTubeLocale(),
+            visitorData: "v1",
+            dataSyncId: nil,
+            embedVideoId: "emMR03tG2CE"
+        )
+        XCTAssertEqual(embedCtx.thirdParty?.embedUrl, "https://www.youtube.com/watch?v=emMR03tG2CE")
     }
 
     func testPlayerResponseFlexibleStringAndIntDecoding() throws {
@@ -183,11 +210,22 @@ final class MochyInnerTubeTests: XCTestCase {
         )
     }
 
-    func testStreamHeadersAndWebCreatorOrigin() {
-        XCTAssertEqual(YouTubeClient.streamFallbackClients.first, .iOS)
-        let webRemixIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .webRemix) ?? -1
-        let iPadIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .iPadOS) ?? 99
-        XCTAssertLessThan(iPadIdx, webRemixIdx)
+    func testStreamHeadersVisionOSFirstAndPrioritizedItag18() {
+        XCTAssertEqual(YouTubeClient.streamFallbackClients.first, .visionOS)
+        let visionIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .visionOS) ?? 99
+        let webRemixIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .webRemix) ?? 99
+        let iPadIdx = YouTubeClient.streamFallbackClients.firstIndex(of: .iPadOS) ?? -1
+        XCTAssertLessThan(visionIdx, webRemixIdx)
+        XCTAssertLessThan(webRemixIdx, iPadIdx)
+
+        // Ensure progressive itag 18 is NEVER dropped when 4 adaptive formats precede it
+        let fourAdaptive = [141, 140, 139, 256].map {
+            PlayerResponse.StreamingData.Format(itag: $0, url: "https://ex/\($0)", mimeType: "audio/mp4", bitrate: $0 * 1000)
+        }
+        let itag18 = PlayerResponse.StreamingData.Format(itag: 18, url: "https://ex/18", mimeType: "video/mp4", bitrate: 500_000, width: 640, height: 360)
+        let ranked = YTPlayerResolver.selectCandidateFormats(from: fourAdaptive + [itag18], quality: .high, preferMp4: true)
+        let probed = YTPlayerResolver.prioritizedProbeCandidates(from: ranked)
+        XCTAssertTrue(probed.contains(where: { $0.itag == 18 }))
 
         let iosHeaders = YTPlayerResolver.streamHeaders(for: .iOS, cookie: nil)
         XCTAssertNil(iosHeaders["Origin"])
@@ -198,6 +236,60 @@ final class MochyInnerTubeTests: XCTestCase {
         XCTAssertEqual(creatorHeaders["Origin"], "https://studio.youtube.com")
         XCTAssertEqual(creatorHeaders["Referer"], "https://studio.youtube.com/")
         XCTAssertEqual(creatorHeaders["Cookie"], "SAPISID=x")
+    }
+
+    func testValidateAndMeasureFailsOverAcrossMnMirrorsOnTimeout() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        MockURLProtocol.handler = { request in
+            let host = request.url?.host ?? ""
+            if host.contains("sn-dead") {
+                throw URLError(.timedOut)
+            }
+            let headers = ["Content-Range": "bytes 3978900-3978900/3978901"]
+            return (HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: "HTTP/1.1", headerFields: headers)!, Data([0xAA]))
+        }
+
+        let deadEdgeURL = URL(string: "https://rr5---sn-dead.googlevideo.com/videoplayback?mn=sn-dead,sn-healthy&clen=3978901")!
+        let result = await YTPlayerResolver.validateAndMeasureStreamURL(
+            url: deadEdgeURL,
+            client: .visionOS,
+            contentLength: YTPlayerResolver.extractClenParam(from: deadEdgeURL),
+            cookie: nil,
+            session: session
+        )
+        XCTAssertTrue(result.isValid)
+        XCTAssertEqual(result.validatedURL.host, "rr5---sn-healthy.googlevideo.com")
+        XCTAssertEqual(result.measuredLength, 3_978_901)
+    }
+
+    func testResolverReportsPerClientDiagnosticReasonsWhenAllClientsFail() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        MockURLProtocol.handler = { request in
+            let body = """
+            {"playabilityStatus":{"status":"UNPLAYABLE","reason":"Video unavailable in region"}}
+            """.data(using: .utf8)!
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!, body)
+        }
+
+        let resolver = YTPlayerResolver(
+            innerTube: InnerTubeClient(visitorData: "v-test", session: session),
+            session: session
+        )
+        do {
+            _ = try await resolver.resolveStream(videoId: "blocked_vid")
+            XCTFail("Expected noPlayableStream error")
+        } catch let err as YTPlayerResolverError {
+            let desc = err.errorDescription ?? ""
+            XCTAssertTrue(desc.contains("visionOS: UNPLAYABLE (Video unavailable in region)"), "Actual error: \(desc)")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testValidateStreamURLHandlesTiny416VsCutoff416() async {

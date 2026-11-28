@@ -17,9 +17,11 @@ public enum SourceResolutionError: Error, LocalizedError {
 }
 
 /// Multi-source router implementing Mochy Music's Just-In-Time resolution order:
-/// 1) Local / Offline bypass, 2) Forced route (`ProviderSwitch`), 3) Parallel speculative walk ahead of YouTube, 4) YouTube (`YTPlayerResolver`).
+/// 1) Local / Offline bypass, 2) Forced route (`ProviderSwitch`), 3) Speculative walk ahead of YouTube,
+/// 4) YouTube (`YTPlayerResolver`), 5) Post-YouTube fallback modules (`Monochrome FLAC`, `JioSaavn`, custom web modules).
 public actor SourceModulesRouter {
-    private static let moduleTimeoutNs: UInt64 = 3_500_000_000
+    private static let speculativeTimeoutNs: UInt64 = 4_000_000_000
+    private static let fallbackTimeoutNs: UInt64 = 8_000_000_000
     private static let failedSourceMemorySeconds: TimeInterval = 10 * 60
 
     private let youtubeResolver: YTPlayerResolver
@@ -57,6 +59,18 @@ public actor SourceModulesRouter {
 
     public func markSourceFailed(sourceId: String, trackId: String) {
         failedSources["\(sourceId):\(trackId)"] = Date()
+    }
+
+    public func clearFailedSources(forTrackId trackId: String) {
+        let suffix = ":\(trackId)"
+        for key in failedSources.keys where key.hasSuffix(suffix) {
+            failedSources.removeValue(forKey: key)
+        }
+    }
+
+    private func isRecentlyFailed(sourceId: String, trackId: String) -> Bool {
+        guard let failedAt = failedSources["\(sourceId):\(trackId)"] else { return false }
+        return Date().timeIntervalSince(failedAt) < Self.failedSourceMemorySeconds
     }
 
     public func resolve(
@@ -104,17 +118,17 @@ public actor SourceModulesRouter {
         // Step 3: Parallel speculative walk for all modules ranked ahead of "youtube"
         let youtubeIndex = sourceOrder.firstIndex(of: "youtube") ?? sourceOrder.count
         let preYoutubeIds = Array(sourceOrder.prefix(youtubeIndex)).filter { sourceId in
-            guard modules[sourceId] != nil else { return false }
-            if let failedAt = failedSources["\(sourceId):\(track.id)"],
-               Date().timeIntervalSince(failedAt) < Self.failedSourceMemorySeconds {
-                return false
-            }
-            return true
+            modules[sourceId] != nil && !isRecentlyFailed(sourceId: sourceId, trackId: track.id)
         }
 
         if !preYoutubeIds.isEmpty {
             let activeModules = preYoutubeIds.compactMap { id in modules[id].map { (id, $0) } }
-            if let winner = await raceModulesInOrder(track: track, quality: quality, orderedModules: activeModules) {
+            if let winner = await raceModulesInOrder(
+                track: track,
+                quality: quality,
+                orderedModules: activeModules,
+                timeoutNs: Self.speculativeTimeoutNs
+            ) {
                 return winner
             }
             for id in preYoutubeIds {
@@ -122,18 +136,65 @@ public actor SourceModulesRouter {
             }
         }
 
-        // Step 4: YouTube InnerTube fallback (always authoritative fallback)
-        do {
-            return try await resolveYouTube(track: track, quality: quality, preferMp4OnIOS: preferMp4OnIOS)
-        } catch {
-            throw SourceResolutionError.failedAllSources(error.localizedDescription)
+        // Step 4: YouTube InnerTube primary / mid-chain resolution
+        var youtubeErrorDescription: String?
+        let youtubeMarkedFailed = isRecentlyFailed(sourceId: "youtube", trackId: track.id)
+        if !youtubeMarkedFailed {
+            do {
+                return try await resolveYouTube(track: track, quality: quality, preferMp4OnIOS: preferMp4OnIOS)
+            } catch {
+                youtubeErrorDescription = error.localizedDescription
+            }
         }
+
+        // Step 5: Post-YouTube fallback modules (e.g. Monochrome FLAC & JioSaavn when sourceOrder is ["youtube", "monochrome", "jiosaavn"])
+        let postStart = min(youtubeIndex + 1, sourceOrder.count)
+        let postYoutubeIds = Array(sourceOrder.suffix(from: postStart)).filter { sourceId in
+            modules[sourceId] != nil && !isRecentlyFailed(sourceId: sourceId, trackId: track.id)
+        }
+        if !postYoutubeIds.isEmpty {
+            let fallbackModules = postYoutubeIds.compactMap { id in modules[id].map { (id, $0) } }
+            if let winner = await raceModulesInOrder(
+                track: track,
+                quality: quality,
+                orderedModules: fallbackModules,
+                timeoutNs: Self.fallbackTimeoutNs
+            ) {
+                return winner
+            }
+            for id in postYoutubeIds {
+                failedSources["\(id):\(track.id)"] = Date()
+            }
+        }
+
+        // Step 6: If YouTube was skipped due to an earlier mid-track failure and no fallback module matched, give YouTube a fresh attempt.
+        if youtubeMarkedFailed {
+            failedSources.removeValue(forKey: "youtube:\(track.id)")
+            do {
+                return try await resolveYouTube(track: track, quality: quality, preferMp4OnIOS: preferMp4OnIOS)
+            } catch {
+                youtubeErrorDescription = error.localizedDescription
+            }
+        }
+
+        var reasons: [String] = []
+        if let ytErr = youtubeErrorDescription {
+            reasons.append(ytErr)
+        }
+        let triedModules = preYoutubeIds + postYoutubeIds
+        if !triedModules.isEmpty {
+            reasons.append("Fallbacks [\(triedModules.joined(separator: ", "))] found no playable stream.")
+        }
+        throw SourceResolutionError.failedAllSources(
+            reasons.isEmpty ? "No playable stream resolved." : reasons.joined(separator: " — ")
+        )
     }
 
     private func raceModulesInOrder(
         track: ModuleTrack,
         quality: AudioQuality,
-        orderedModules: [(String, any MochyStreamModule)]
+        orderedModules: [(String, any MochyStreamModule)],
+        timeoutNs: UInt64
     ) async -> ModuleStream? {
         await withTaskGroup(of: (Int, ModuleStream?).self) { group in
             for (idx, pair) in orderedModules.enumerated() {
@@ -145,7 +206,7 @@ public actor SourceModulesRouter {
 
             // Timeout watchdog
             group.addTask {
-                try? await Task.sleep(nanoseconds: Self.moduleTimeoutNs)
+                try? await Task.sleep(nanoseconds: timeoutNs)
                 return (-1, nil)
             }
 

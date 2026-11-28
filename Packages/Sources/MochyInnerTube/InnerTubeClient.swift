@@ -44,8 +44,8 @@ public actor InnerTubeClient {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.default
-            cfg.timeoutIntervalForRequest = 5
-            cfg.timeoutIntervalForResource = 10
+            cfg.timeoutIntervalForRequest = 8
+            cfg.timeoutIntervalForResource = 16
             self.session = URLSession(configuration: cfg)
         }
         self.encoder = JSONEncoder()
@@ -116,7 +116,8 @@ public actor InnerTubeClient {
         let context = client.toContext(
             locale: locale,
             visitorData: visitor,
-            dataSyncId: effectiveDataSync
+            dataSyncId: effectiveDataSync,
+            embedVideoId: videoId
         )
 
         let playbackContext = signatureTimestamp.map {

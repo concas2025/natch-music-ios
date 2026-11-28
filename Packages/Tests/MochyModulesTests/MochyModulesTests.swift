@@ -142,5 +142,45 @@ final class MochyModulesTests: XCTestCase {
             offlineMode: true
         )
         XCTAssertEqual(local.sourceId, "local")
+
+        // When "youtube" is #1 and fails (or is marked failed), router MUST fall back to post-YouTube modules!
+        let failingSessionCfg = URLSessionConfiguration.ephemeral
+        failingSessionCfg.protocolClasses = [FailingYTProtocol.self]
+        let failingSession = URLSession(configuration: failingSessionCfg)
+        let failingYT = YTPlayerResolver(
+            innerTube: InnerTubeClient(session: failingSession),
+            session: failingSession
+        )
+        let monoFallback = StubModule(
+            id: "monochrome",
+            displayName: "Monochrome FLAC",
+            stream: ModuleStream(
+                url: URL(string: "https://tracks.monochrome.st/track/164377007696642048")!,
+                codec: "FLAC",
+                mimeType: "audio/flac",
+                bitrate: 1_411_200,
+                sourceId: "monochrome",
+                sourceLabel: "Monochrome FLAC",
+                qualityBadge: "FLAC · 16-bit / 44.1 kHz"
+            )
+        )
+        let routerWithPostFallback = SourceModulesRouter(youtubeResolver: failingYT, modules: [monoFallback, slowOrNil])
+        let postFallbackStream = try await routerWithPostFallback.resolve(
+            track: ModuleTrack(id: "emMR03tG2CE", title: "Hãy Trao Cho Anh", artist: "Sơn Tùng M-TP"),
+            sourceOrder: ["youtube", "monochrome", "jiosaavn"]
+        )
+        XCTAssertEqual(postFallbackStream.sourceId, "monochrome")
     }
+}
+
+private final class FailingYTProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let resp = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)!
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

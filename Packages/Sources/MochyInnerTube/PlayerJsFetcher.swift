@@ -35,8 +35,15 @@ public actor PlayerJsFetcher {
     private let cacheDirectory: URL
     private var memoryCache: (bundle: PlayerJsBundle, fetchedAt: Date)?
 
-    public init(session: URLSession = .shared, cacheDirectory: URL? = nil) {
-        self.session = session
+    public init(session: URLSession? = nil, cacheDirectory: URL? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.default
+            cfg.timeoutIntervalForRequest = 8
+            cfg.timeoutIntervalForResource = 16
+            self.session = URLSession(configuration: cfg)
+        }
         if let cacheDirectory {
             self.cacheDirectory = cacheDirectory
         } else {

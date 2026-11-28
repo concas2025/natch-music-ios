@@ -141,12 +141,13 @@ final class MochyAudioTests: XCTestCase {
     }
 
     func testLocalAudioProxyServesHeadRangeAndRefreshesOn403AndBuildsFailoverURLs() async throws {
-        // 1. Verify YouTube mn= failover URL builder
+        // 1. Verify YouTube mn= failover URL builder preserves original rrN--- shard first, then rr1/rr2
         let ytURL = URL(string: "https://rr3---sn-primary.googlevideo.com/videoplayback?mn=sn-primary,sn-backup&itag=140")!
         let failovers = LocalAudioProxy.buildFailoverURLs(for: ytURL)
-        XCTAssertEqual(failovers.count, 2)
-        XCTAssertEqual(failovers[0].host, "rr1---sn-backup.googlevideo.com")
-        XCTAssertEqual(failovers[1].host, "rr2---sn-backup.googlevideo.com")
+        XCTAssertEqual(failovers.count, 3)
+        XCTAssertEqual(failovers[0].host, "rr3---sn-backup.googlevideo.com")
+        XCTAssertEqual(failovers[1].host, "rr1---sn-backup.googlevideo.com")
+        XCTAssertEqual(failovers[2].host, "rr2---sn-backup.googlevideo.com")
 
         // 2. End-to-end loopback proxy test with 403 -> onRefresh URL hot-swap
         let payload = Data((0..<(300 * 1024)).map { UInt8($0 & 0xFF) })

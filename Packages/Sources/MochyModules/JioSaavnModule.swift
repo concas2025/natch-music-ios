@@ -34,8 +34,8 @@ public actor JioSaavnModule: MochyStreamModule {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 3.5
-            cfg.timeoutIntervalForResource = 5.0
+            cfg.timeoutIntervalForRequest = 5.5
+            cfg.timeoutIntervalForResource = 9.0
             self.session = URLSession(configuration: cfg)
         }
     }
@@ -65,7 +65,7 @@ public actor JioSaavnModule: MochyStreamModule {
             req.setValue("explicit_content=1", forHTTPHeaderField: "Cookie")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-            req.timeoutInterval = 3.5
+            req.timeoutInterval = 5.5
 
             let (data, response): (Data, URLResponse)
             do {

@@ -23,74 +23,82 @@ public struct RootShellView: View {
     }
 
     public var body: some View {
-        ZStack {
-            // Background Tabs (respect keyboard safe area so SearchScreen input never gets obscured)
-            Group {
-                switch coordinator.selectedTab {
-                case .home:
-                    HomeScreen(coordinator: coordinator)
-                case .search:
-                    SearchScreen(coordinator: coordinator)
-                case .library:
-                    LibraryScreen(coordinator: coordinator)
-                case .settings:
-                    MochySettingsScreen(coordinator: coordinator)
+        GeometryReader { screenGeo in
+            let bottomSafeInset = screenGeo.safeAreaInsets.bottom
+            // Rest floating NavPill directly above the thin iOS Home Indicator (~13pt from physical bottom)
+            // without double-counting the 34pt safe-area inset (1:1 with Mochy's tight 8dp bottom margin).
+            let navBottomPadding: CGFloat = bottomSafeInset > 0 ? 14 : 8
+
+            ZStack {
+                // Background Tabs (respect keyboard safe area so SearchScreen input never gets obscured)
+                Group {
+                    switch coordinator.selectedTab {
+                    case .home:
+                        HomeScreen(coordinator: coordinator)
+                    case .search:
+                        SearchScreen(coordinator: coordinator)
+                    case .library:
+                        LibraryScreen(coordinator: coordinator)
+                    case .settings:
+                        MochySettingsScreen(coordinator: coordinator)
+                    }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .scaleEffect(1.0 - 0.06 * coordinator.activeProgress)
-            .opacity(max(0.0, 1.0 - coordinator.activeProgress * 0.85))
-            .allowsHitTesting(coordinator.activeProgress < 0.25)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scaleEffect(1.0 - 0.06 * coordinator.activeProgress)
+                .opacity(max(0.0, 1.0 - coordinator.activeProgress * 0.85))
+                .allowsHitTesting(coordinator.activeProgress < 0.25)
 
-            // Floating Chrome + Morphing Player pinned outside keyboard safe area
-            GeometryReader { geo in
-                let maxHeight = max(geo.size.height, 640)
-                let progress = effectiveExpansionProgress(maxHeight: maxHeight)
+                // Floating Chrome + Morphing Player pinned to physical bottom edge (ignoring bottom & keyboard safe areas)
+                GeometryReader { geo in
+                    let maxHeight = max(geo.size.height, 640)
+                    let progress = effectiveExpansionProgress(maxHeight: maxHeight)
 
-                ZStack(alignment: .bottom) {
-                    VStack(spacing: 8) {
-                        if let current = coordinator.player.currentItem, !coordinator.isPlayerExpanded {
-                            miniPlayerBar(item: current)
-                                .offset(x: miniSwipeOffsetX)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                                .gesture(miniPlayerGesture(maxHeight: maxHeight))
-                                .onTapGesture {
-                                    withAnimation(.spring(response: 0.40, dampingFraction: 0.86)) {
-                                        coordinator.isPlayerExpanded = true
+                    ZStack(alignment: .bottom) {
+                        VStack(spacing: 8) {
+                            if let current = coordinator.player.currentItem, !coordinator.isPlayerExpanded {
+                                miniPlayerBar(item: current)
+                                    .offset(x: miniSwipeOffsetX)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                                    .gesture(miniPlayerGesture(maxHeight: maxHeight))
+                                    .onTapGesture {
+                                        withAnimation(.spring(response: 0.40, dampingFraction: 0.86)) {
+                                            coordinator.isPlayerExpanded = true
+                                            dragTranslation = 0
+                                        }
+                                    }
+                            }
+
+                            floatingNavPill
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, navBottomPadding)
+                        .offset(y: 160 * progress)
+                        .opacity(isKeyboardVisible ? 0 : max(0.0, 1.0 - Double(progress) / 0.58))
+                        .allowsHitTesting(!isKeyboardVisible && progress < 0.25)
+
+                        if coordinator.player.currentItem != nil && (coordinator.isPlayerExpanded || dragTranslation < -8) {
+                            FullPlayerContainerView(
+                                coordinator: coordinator,
+                                coverNamespace: coverNamespace,
+                                dragProgress: progress,
+                                onCollapse: {
+                                    withAnimation(.spring(response: 0.40, dampingFraction: 0.88)) {
+                                        coordinator.isPlayerExpanded = false
                                         dragTranslation = 0
                                     }
                                 }
+                            )
+                            .offset(y: sheetYOffset(maxHeight: maxHeight))
+                            .gesture(fullPlayerDragGesture(maxHeight: maxHeight))
+                            .transition(.move(edge: .bottom))
+                            .zIndex(10)
                         }
-
-                        floatingNavPill
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, max(geo.safeAreaInsets.bottom, 10))
-                    .offset(y: 128 * progress)
-                    .opacity(isKeyboardVisible ? 0 : max(0.0, 1.0 - Double(progress) / 0.58))
-                    .allowsHitTesting(!isKeyboardVisible && progress < 0.25)
-
-                    if coordinator.player.currentItem != nil && (coordinator.isPlayerExpanded || dragTranslation < -8) {
-                        FullPlayerContainerView(
-                            coordinator: coordinator,
-                            coverNamespace: coverNamespace,
-                            dragProgress: progress,
-                            onCollapse: {
-                                withAnimation(.spring(response: 0.40, dampingFraction: 0.88)) {
-                                    coordinator.isPlayerExpanded = false
-                                    dragTranslation = 0
-                                }
-                            }
-                        )
-                        .offset(y: sheetYOffset(maxHeight: maxHeight))
-                        .gesture(fullPlayerDragGesture(maxHeight: maxHeight))
-                        .transition(.move(edge: .bottom))
-                        .zIndex(10)
-                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .ignoresSafeArea(edges: .bottom)
+                .ignoresSafeArea(.keyboard)
             }
-            .ignoresSafeArea(.keyboard)
         }
         .background(MochyTheme.background(pureBlack: coordinator.settings.pureBlack).ignoresSafeArea())
         #if os(iOS)

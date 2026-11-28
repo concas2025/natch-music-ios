@@ -65,7 +65,7 @@ public struct FlagshipPlayerView: View {
                                 .foregroundStyle(.white.opacity(0.85))
                                 .lineLimit(1)
                             Button("Retry") {
-                                coordinator.player.jumpToQueueIndex(coordinator.player.currentIndex)
+                                coordinator.player.retryCurrentTrack()
                             }
                             .font(.caption2.bold())
                             .foregroundStyle(.black)

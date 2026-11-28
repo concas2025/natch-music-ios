@@ -7,6 +7,7 @@ import MochyDSP
 import MochyInnerTube
 import MochyModules
 import Observation
+import os
 #if os(iOS) && canImport(CoreHaptics)
 import CoreHaptics
 #endif
@@ -16,6 +17,8 @@ import MusicKit
 #if os(iOS) && canImport(UIKit)
 import UIKit
 #endif
+
+private let audioPlayerLog = Logger(subsystem: "com.natch.music", category: "MochyAudioPlayer")
 
 public enum RepeatMode: String, CaseIterable, Codable, Sendable {
     case off
@@ -322,6 +325,10 @@ public final class MochyAudioPlayer {
 
     public func resume() {
         guard currentItem != nil else { return }
+        if !isDRMStream && (primaryPlayer == nil || lastError != nil) {
+            retryCurrentTrack()
+            return
+        }
         isPlaying = true
         if isDRMStream {
             #if os(iOS) && canImport(MusicKit)
@@ -334,6 +341,16 @@ public final class MochyAudioPlayer {
             }
         }
         updateNowPlayingInfo()
+    }
+
+    public func retryCurrentTrack() {
+        guard let item = currentItem else { return }
+        let savedPos = currentTime
+        Task {
+            await router.clearFailedSources(forTrackId: item.id)
+            await localProxy.invalidateTrack(item.id)
+            loadAndPlayCurrent(resumeAtSeconds: savedPos)
+        }
     }
 
     public func skipNext() {
@@ -460,13 +477,13 @@ public final class MochyAudioPlayer {
 
     // MARK: - Just-In-Time Track Preparation (Generation Guarded)
 
-    private func loadAndPlayCurrent(resumeAtSeconds: TimeInterval = 0) {
+    private func loadAndPlayCurrent(resumeAtSeconds: TimeInterval = 0, isRecovery: Bool = false) {
         guard let item = currentItem else { return }
         loadGeneration &+= 1
         let gen = loadGeneration
         playRecordedForGeneration = false
         scrobbleFiredForGeneration = false
-        recoveredMidTrackForGeneration = false
+        recoveredMidTrackForGeneration = isRecovery
         crossmixInFlightForIndex = nil
         lastError = nil
         isBuffering = true
@@ -526,6 +543,7 @@ public final class MochyAudioPlayer {
                 self.updateNowPlayingInfo()
             } catch {
                 guard gen == self.loadGeneration else { return }
+                audioPlayerLog.error("[\(item.id, privacy: .public)] Stream load failed: \(error.localizedDescription, privacy: .public)")
                 self.isBuffering = false
                 self.isPlaying = false
                 self.lastError = error.localizedDescription
@@ -734,19 +752,21 @@ public final class MochyAudioPlayer {
 
     private func handleMidTrackPlaybackFailure(error: Error?, generation: UInt64) {
         guard generation == loadGeneration else { return }
+        let errDetail = error?.localizedDescription ?? primaryPlayer?.currentItem?.errorLog()?.events.last?.errorComment ?? "Stream playback interrupted."
+        audioPlayerLog.error("Mid-track playback failure at \(self.currentTime)s: \(errDetail, privacy: .public)")
         if !recoveredMidTrackForGeneration, let item = currentItem {
-            recoveredMidTrackForGeneration = true
             let resumePos = currentTime
             let failedSrc = activeSourceId.isEmpty ? "youtube" : activeSourceId
             Task {
+                await localProxy.invalidateTrack(item.id)
                 await router.markSourceFailed(sourceId: failedSrc, trackId: item.id)
-                loadAndPlayCurrent(resumeAtSeconds: resumePos)
+                loadAndPlayCurrent(resumeAtSeconds: resumePos, isRecovery: true)
             }
             return
         }
         isBuffering = false
         isPlaying = false
-        lastError = error?.localizedDescription ?? "Stream playback interrupted."
+        lastError = errDetail
     }
 
     private func playMusicKitDRM(url: URL, resumeAt: TimeInterval, generation: UInt64) async throws {

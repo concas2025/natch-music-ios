@@ -277,11 +277,36 @@ extension YTPlayerResolver {
             }
 
             if !options.isEmpty {
-                // Prefer progressive muxed MP4 first for guaranteed iOS playback, then higher resolution MP4.
-                return options.sorted { lhs, rhs in
+                let sorted = options.sorted { lhs, rhs in
                     if lhs.isProgressive != rhs.isProgressive { return lhs.isProgressive }
                     return lhs.height > rhs.height
                 }
+                let probeCandidate = sorted.first(where: { $0.height <= 720 }) ?? sorted[0]
+                let check = await validateAndMeasureStream(
+                    url: probeCandidate.url,
+                    client: client,
+                    contentLength: Self.extractClenParam(from: probeCandidate.url),
+                    cookie: client.loginSupported ? cookie : nil
+                )
+                guard check.isValid else { continue }
+
+                if let healthyHost = check.validatedURL.host, healthyHost != probeCandidate.url.host {
+                    return sorted.map { opt in
+                        var comps = URLComponents(url: opt.url, resolvingAgainstBaseURL: false)
+                        comps?.host = healthyHost
+                        return YTVideoStreamOption(
+                            itag: opt.itag,
+                            qualityLabel: opt.qualityLabel,
+                            width: opt.width,
+                            height: opt.height,
+                            url: comps?.url ?? opt.url,
+                            mimeType: opt.mimeType,
+                            headers: opt.headers,
+                            isProgressive: opt.isProgressive
+                        )
+                    }
+                }
+                return sorted
             }
         }
         return []

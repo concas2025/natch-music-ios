@@ -1,5 +1,8 @@
 import Foundation
 import MochyCore
+import os
+
+private let resolverLog = Logger(subsystem: "com.natch.music", category: "YTPlayerResolver")
 
 public struct ResolvedStream: Sendable, Equatable {
     public let videoId: String
@@ -99,8 +102,8 @@ public actor YTPlayerResolver {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 4
-            cfg.timeoutIntervalForResource = 8
+            cfg.timeoutIntervalForRequest = 4.5
+            cfg.timeoutIntervalForResource = 10
             self.session = URLSession(configuration: cfg)
         }
         self.customValidator = customValidator
@@ -171,11 +174,12 @@ public actor YTPlayerResolver {
             }
         }
 
-        var lastReason: String?
+        var clientFailures: [String] = []
         var cachedSignatureTimestamp: Int?
         var poTokenResult: PoTokenResult?
 
         for client in clientOrder {
+            let clientLabel = client.friendlyName ?? client.clientName
             var attemptsForClient = client == .visionOS ? 2 : 1
             while attemptsForClient > 0 {
                 attemptsForClient -= 1
@@ -202,22 +206,31 @@ public actor YTPlayerResolver {
                         setLogin: isLoggedIn && client.loginSupported
                     )
                 } catch {
-                    lastReason = error.localizedDescription
+                    let reason = "\(clientLabel): \(error.localizedDescription)"
+                    clientFailures.append(reason)
+                    resolverLog.warning("[\(videoId, privacy: .public)] \(reason, privacy: .public)")
                     break
                 }
 
                 guard response.playabilityStatus.status == "OK", let streamingData = response.streamingData else {
-                    lastReason = response.playabilityStatus.reason ?? response.playabilityStatus.status
+                    let statusText = response.playabilityStatus.status
+                    let detail = response.playabilityStatus.reason.map { " (\($0))" } ?? ""
                     if client == .visionOS && Self.looksLikeBotCheck(response.playabilityStatus) {
                         visionOSBotChecks += 1
                         await innerTube.invalidateOwnVisitorId(for: .visionOS)
                         if visionOSBotChecks >= 2 {
                             visionOSRestUntil = Date().addingTimeInterval(Self.visionOSRestDuration)
                             visionOSBotChecks = 0
+                            clientFailures.append("\(clientLabel): \(statusText)\(detail)")
                             break
                         }
-                        continue
+                        if attemptsForClient > 0 {
+                            continue
+                        }
                     }
+                    let reason = "\(clientLabel): \(statusText)\(detail)"
+                    clientFailures.append(reason)
+                    resolverLog.notice("[\(videoId, privacy: .public)] \(reason, privacy: .public)")
                     break
                 }
 
@@ -230,30 +243,59 @@ public actor YTPlayerResolver {
                     quality: quality,
                     preferMp4: preferMp4
                 )
+                let formatsToProbe = Self.prioritizedProbeCandidates(from: candidates)
+                if formatsToProbe.isEmpty {
+                    clientFailures.append("\(clientLabel): no iOS MP4/AAC format")
+                    break
+                }
 
-                for format in candidates.prefix(3) {
-                    guard var rawURL = try? await resolveFormatURL(format: format, client: client) else {
+                var formatReasons: [String] = []
+                for format in formatsToProbe {
+                    let rawURL: String
+                    do {
+                        rawURL = try await resolveFormatURL(format: format, client: client)
+                    } catch {
+                        formatReasons.append("itag \(format.itag) cipher(\(error.localizedDescription))")
                         continue
                     }
+
+                    var finalURLString = rawURL
                     if client.useWebPoTokens, let streamPot = poTokenResult?.streamingDataPoToken {
-                        let sep = rawURL.contains("?") ? "&" : "?"
-                        rawURL += "\(sep)pot=\(streamPot)"
+                        let sep = finalURLString.contains("?") ? "&" : "?"
+                        finalURLString += "\(sep)pot=\(streamPot)"
                     }
-                    guard let streamURL = URL(string: rawURL) else {
+                    guard let streamURL = URL(string: finalURLString) else {
+                        formatReasons.append("itag \(format.itag) invalid URL")
                         continue
                     }
 
                     let activeCookie = (isLoggedIn && client.loginSupported) ? cookie : nil
-                    let validation = await validateAndMeasureStream(
+                    let effectiveLength = format.contentLength ?? Self.extractClenParam(from: streamURL)
+                    var validation = await validateAndMeasureStream(
                         url: streamURL,
                         client: client,
-                        contentLength: format.contentLength,
+                        contentLength: effectiveLength,
                         cookie: activeCookie
                     )
+
+                    // Mirror YTPlayerUtils.kt: if a direct URL failed probe and client solves n-param, retry with explicit n-transform.
+                    if !validation.isValid, format.url != nil, client.solvesN,
+                       let nTransformed = try? await ejsSolver.transformNParam(in: finalURLString),
+                       nTransformed != finalURLString,
+                       let retryURL = URL(string: nTransformed) {
+                        validation = await validateAndMeasureStream(
+                            url: retryURL,
+                            client: client,
+                            contentLength: effectiveLength,
+                            cookie: activeCookie
+                        )
+                    }
+
                     if validation.isValid {
+                        resolverLog.info("[\(videoId, privacy: .public)] Resolved via \(clientLabel, privacy: .public) itag=\(format.itag) host=\(validation.validatedURL.host ?? "?", privacy: .public)")
                         return ResolvedStream(
                             videoId: videoId,
-                            streamURL: streamURL,
+                            streamURL: validation.validatedURL,
                             format: format,
                             clientUsed: client,
                             loudnessDb: response.playerConfig?.audioConfig?.loudnessDb ?? format.loudnessDb,
@@ -261,15 +303,24 @@ public actor YTPlayerResolver {
                             expiresInSeconds: streamingData.expiresInSeconds,
                             requiredHeaders: Self.streamHeaders(for: client, cookie: activeCookie),
                             videoDetails: response.videoDetails,
-                            verifiedContentLength: validation.measuredLength ?? format.contentLength
+                            verifiedContentLength: validation.measuredLength ?? effectiveLength
                         )
+                    } else {
+                        formatReasons.append("itag \(format.itag) \(validation.failureReason ?? "probe failed")")
                     }
                 }
+
+                let joinedFormatReason = formatReasons.isEmpty ? "probe failed" : formatReasons.joined(separator: ", ")
+                let summary = "\(clientLabel): \(joinedFormatReason)"
+                clientFailures.append(summary)
+                resolverLog.warning("[\(videoId, privacy: .public)] \(summary, privacy: .public)")
                 break
             }
         }
 
-        throw YTPlayerResolverError.noPlayableStream(lastReason: lastReason)
+        let finalReason = Self.summarizeFailures(clientFailures)
+        resolverLog.error("[\(videoId, privacy: .public)] All YouTube clients failed: \(finalReason ?? "unknown", privacy: .public)")
+        throw YTPlayerResolverError.noPlayableStream(lastReason: finalReason)
     }
 
     // MARK: - Stand-In Uploads & Studio Audio Swap
@@ -463,14 +514,28 @@ public actor YTPlayerResolver {
         return reason.contains("bot") || reason.contains("sign in")
     }
 
-    // MARK: - URL Construction & Range Validation
+    /// Keeps up to 3 top adaptive audio formats PLUS any progressive muxed `itag 18` MP4 fallback
+    /// so `itag 18` is never sliced off when a client offers 3+ adaptive streams.
+    public static func prioritizedProbeCandidates(
+        from ranked: [PlayerResponse.StreamingData.Format]
+    ) -> [PlayerResponse.StreamingData.Format] {
+        let adaptive = ranked.filter { $0.itag != 18 }.prefix(3)
+        let progressive = ranked.filter { $0.itag == 18 }
+        var result = Array(adaptive)
+        for p in progressive where !result.contains(p) {
+            result.append(p)
+        }
+        return result
+    }
+
+    // MARK: - URL Construction, CDN Failover & Range Validation
 
     internal func resolveFormatURL(
         format: PlayerResponse.StreamingData.Format,
         client: YouTubeClient = .webRemix
     ) async throws -> String {
         if let direct = format.url, !direct.isEmpty {
-            if client.useSignatureTimestamp {
+            if client.solvesN {
                 return (try? await ejsSolver.transformNParam(in: direct)) ?? direct
             }
             return direct
@@ -481,15 +546,15 @@ public actor YTPlayerResolver {
         throw EjsSolverError.invalidCipherParameters
     }
 
-    private func validateAndMeasureStream(
+    internal func validateAndMeasureStream(
         url: URL,
         client: YouTubeClient,
         contentLength: Int64?,
         cookie: String?
-    ) async -> (isValid: Bool, measuredLength: Int64?) {
+    ) async -> (isValid: Bool, validatedURL: URL, measuredLength: Int64?, failureReason: String?) {
         if let customValidator {
             let ok = await customValidator(url, client, contentLength, cookie)
-            return (ok, contentLength)
+            return (ok, url, contentLength, ok ? nil : "custom validator rejected")
         }
         return await Self.validateAndMeasureStreamURL(
             url: url,
@@ -500,8 +565,47 @@ public actor YTPlayerResolver {
         )
     }
 
+    /// Builds signed `mn=primary,fallback` `googlevideo.com` failover URLs, preserving the original `rrN---` shard prefix first
+    /// (critical when local ISP edge cache nodes like `rr5---sn-42u-i5oss` drop TCP SYN packets while `rr5---sn-ajogu5-5j` is live).
+    public static func buildFailoverURLs(for original: URL) -> [URL] {
+        guard let host = original.host?.lowercased(), host.contains("googlevideo.com"),
+              var comps = URLComponents(url: original, resolvingAgainstBaseURL: false),
+              let mn = comps.queryItems?.first(where: { $0.name == "mn" })?.value else {
+            return []
+        }
+        let nodes = mn.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        guard nodes.count >= 2 else { return [] }
+        let fallbackNode = nodes[1]
+
+        var prefixes: [String] = []
+        if let dashRange = host.range(of: "---") {
+            prefixes.append(String(host[..<dashRange.upperBound]))
+        }
+        for p in ["rr1---", "rr2---", "rr3---"] where !prefixes.contains(p) {
+            prefixes.append(p)
+        }
+
+        var urls: [URL] = []
+        for prefix in prefixes {
+            comps.host = "\(prefix)\(fallbackNode).googlevideo.com"
+            if let alt = comps.url, alt != original, !urls.contains(alt) {
+                urls.append(alt)
+            }
+        }
+        return urls
+    }
+
+    public static func extractClenParam(from url: URL) -> Int64? {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let raw = comps.queryItems?.first(where: { $0.name == "clen" })?.value,
+              let parsed = Int64(raw), parsed > 0 else {
+            return nil
+        }
+        return parsed
+    }
+
     /// Probes past the ~1 MiB untokened cutoff (`1,150,000`) when `contentLength == nil` or probes the final byte
-    /// when `contentLength` is known, rejecting HTTP 416 / 403 cutoff streams.
+    /// when `contentLength` is known, rejecting HTTP 416 / 403 cutoff streams and failing over across `mn=` CDN mirrors on timeout.
     public static func validateStreamURL(
         url: URL,
         client: YouTubeClient,
@@ -524,32 +628,62 @@ public actor YTPlayerResolver {
         contentLength: Int64?,
         cookie: String?,
         session: URLSession
-    ) async -> (isValid: Bool, measuredLength: Int64?) {
-        let request = buildValidationRequest(
-            url: url,
-            client: client,
-            contentLength: contentLength,
-            cookie: cookie
-        )
-        do {
-            let (_, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return (false, nil) }
-            if http.statusCode == 206 || http.statusCode == 200 {
-                let totalFromRange = parseContentRangeTotal(http.value(forHTTPHeaderField: "Content-Range"))
-                let fallbackTotal = http.expectedContentLength > 0 ? http.expectedContentLength : nil
-                return (true, totalFromRange ?? contentLength ?? fallbackTotal)
+    ) async -> (isValid: Bool, validatedURL: URL, measuredLength: Int64?, failureReason: String?) {
+        let candidates = [url] + buildFailoverURLs(for: url)
+        var lastFailure: String?
+
+        for candidateURL in candidates {
+            var request = buildValidationRequest(
+                url: candidateURL,
+                client: client,
+                contentLength: contentLength,
+                cookie: cookie
+            )
+            // Keep individual CDN mirror probe crisp so dead ISP cache nodes fail over in ~2.5s.
+            request.timeoutInterval = 2.5
+
+            do {
+                let (_, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    lastFailure = "non-HTTP response"
+                    continue
+                }
+                let finalStreamURL = http.url ?? candidateURL
+                if http.statusCode == 206 || http.statusCode == 200 {
+                    let totalFromRange = parseContentRangeTotal(http.value(forHTTPHeaderField: "Content-Range"))
+                    let fallbackTotal = http.expectedContentLength > 0 ? http.expectedContentLength : nil
+                    return (true, finalStreamURL, totalFromRange ?? contentLength ?? fallbackTotal, nil)
+                }
+                if http.statusCode == 416,
+                   contentLength == nil,
+                   let totalFromRange = parseContentRangeTotal(http.value(forHTTPHeaderField: "Content-Range")),
+                   totalFromRange > 0 && totalFromRange < 700_000 {
+                    return (true, finalStreamURL, totalFromRange, nil)
+                }
+                // Explicit 403 / 416 / 404 from googlevideo indicates token/range rejection (not a dead CDN node); stop mirror walk.
+                lastFailure = "probe HTTP \(http.statusCode)"
+                if http.statusCode == 403 || http.statusCode == 416 || http.statusCode == 404 {
+                    break
+                }
+            } catch let urlErr as URLError {
+                lastFailure = urlErr.code == .timedOut ? "CDN timeout" : "URLError(\(urlErr.code.rawValue))"
+                continue
+            } catch {
+                lastFailure = error.localizedDescription
+                continue
             }
-            if http.statusCode == 416,
-               contentLength == nil,
-               let totalFromRange = parseContentRangeTotal(http.value(forHTTPHeaderField: "Content-Range")),
-               totalFromRange > 0 && totalFromRange < 700_000 {
-                return (true, totalFromRange)
-            }
-            // Reject 416 / 403 / 404: 416 at 1.15 MB indicates a truncated ~786 KB untokened preview stream.
-            return (false, nil)
-        } catch {
-            return (false, nil)
         }
+
+        return (false, url, nil, lastFailure)
+    }
+
+    private static func summarizeFailures(_ failures: [String]) -> String? {
+        guard !failures.isEmpty else { return nil }
+        if failures.count <= 4 {
+            return failures.joined(separator: " | ")
+        }
+        let head = failures.prefix(3).joined(separator: " | ")
+        return "\(head) | +\(failures.count - 3) more"
     }
 
     public static func buildValidationRequest(
