@@ -92,6 +92,8 @@ public struct LibraryScreen: View {
                                 } label: {
                                     Text(chip.rawValue)
                                         .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.85)
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 9)
                                         .background(selected ? MochyTheme.chipActiveSurface : Color(white: 0.095))
@@ -110,6 +112,7 @@ public struct LibraryScreen: View {
 
                         Spacer(minLength: 160)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                 }
                 .onChange(of: coordinator.scrollToTopTrigger) { _, _ in
@@ -641,13 +644,14 @@ private struct MochyChipFlowLayout: Layout {
     var spacing: CGFloat = 8
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? 340
+        let maxWidth: CGFloat = (proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }) ?? 340
+        let subProposal = ProposedViewSize(width: maxWidth, height: nil)
         var x: CGFloat = 0
         var y: CGFloat = 0
         var lineHeight: CGFloat = 0
 
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
+            let size = sub.sizeThatFits(subProposal)
             if x + size.width > maxWidth && x > 0 {
                 x = 0
                 y += lineHeight + spacing
@@ -660,115 +664,142 @@ private struct MochyChipFlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let subProposal = ProposedViewSize(width: max(1, bounds.width), height: nil)
         var x = bounds.minX
         var y = bounds.minY
         var lineHeight: CGFloat = 0
 
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX && x > bounds.minX {
+            let measured = sub.sizeThatFits(subProposal)
+            let clampedWidth = min(measured.width, bounds.width)
+            if x + clampedWidth > bounds.maxX && x > bounds.minX {
                 x = bounds.minX
                 y += lineHeight + spacing
                 lineHeight = 0
             }
-            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            lineHeight = max(lineHeight, size.height)
+            sub.place(
+                at: CGPoint(x: x, y: y),
+                proposal: ProposedViewSize(width: clampedWidth, height: measured.height)
+            )
+            x += clampedWidth + spacing
+            lineHeight = max(lineHeight, measured.height)
         }
     }
 }
 
 // MARK: - Scrolling Service Icons Marquee ("Import your music here!")
 
+private enum ImportBannerService: CaseIterable, Hashable {
+    case youtubeMusic
+    case spotify
+    case appleMusic
+    case tidal
+
+    var resourceName: String {
+        switch self {
+        case .youtubeMusic: return "service_youtube_music"
+        case .spotify: return "service_spotify"
+        case .appleMusic: return "service_apple_music"
+        case .tidal: return "service_tidal"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .youtubeMusic: return "YouTube Music"
+        case .spotify: return "Spotify"
+        case .appleMusic: return "Apple Music"
+        case .tidal: return "TIDAL"
+        }
+    }
+}
+
 private struct ServiceIconsMarquee: View {
-    private let tileStep: CGFloat = 72
-    private let countPerCycle = 4
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let tileSize: CGFloat = 56
+    private let spacing: CGFloat = 16
+    private let bannerHeight: CGFloat = 64
+
+    private static let cachedImages: [ImportBannerService: Image] = {
+        var result: [ImportBannerService: Image] = [:]
+        for service in ImportBannerService.allCases {
+            #if os(iOS) && canImport(UIKit)
+            if let path = Bundle.module.path(forResource: service.resourceName, ofType: "png"),
+               let uiImage = UIImage(contentsOfFile: path) {
+                result[service] = Image(uiImage: uiImage)
+            }
+            #elseif canImport(AppKit)
+            if let url = Bundle.module.url(forResource: service.resourceName, withExtension: "png"),
+               let nsImage = NSImage(contentsOf: url) {
+                result[service] = Image(nsImage: nsImage)
+            }
+            #endif
+        }
+        return result
+    }()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let cycleWidth = tileStep * CGFloat(countPerCycle)
-            let raw = timeline.date.timeIntervalSinceReferenceDate * 22.0
-            let shift = -CGFloat(raw.truncatingRemainder(dividingBy: Double(cycleWidth)))
+        let services = ImportBannerService.allCases
+        let tileStride = tileSize + spacing
+        let cycleWidth = tileStride * CGFloat(services.count)
 
-            HStack(spacing: 16) {
-                ForEach(0..<12, id: \.self) { idx in
-                    serviceTile(kind: idx % 4)
+        GeometryReader { proxy in
+            let viewportWidth = max(proxy.size.width, 1)
+
+            if reduceMotion {
+                let adaptiveSpacing = min(
+                    spacing,
+                    max(6, (viewportWidth - tileSize * CGFloat(services.count) - 24) / CGFloat(max(1, services.count - 1)))
+                )
+                HStack(spacing: adaptiveSpacing) {
+                    ForEach(services, id: \.self) { service in
+                        serviceTile(service)
+                    }
                 }
+                .frame(width: viewportWidth, height: bannerHeight, alignment: .center)
+            } else {
+                let repeatCount = max(3, Int(ceil(viewportWidth / cycleWidth)) + 2)
+                let totalTiles = repeatCount * services.count
+
+                Color.clear
+                    .frame(width: viewportWidth, height: bannerHeight)
+                    .overlay(alignment: .leading) {
+                        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                            let raw = timeline.date.timeIntervalSinceReferenceDate * 22.0
+                            let shift = -CGFloat(raw.truncatingRemainder(dividingBy: Double(cycleWidth)))
+
+                            HStack(spacing: spacing) {
+                                ForEach(0..<totalTiles, id: \.self) { idx in
+                                    serviceTile(services[idx % services.count])
+                                }
+                            }
+                            .fixedSize(horizontal: true, vertical: false)
+                            .offset(x: shift)
+                        }
+                    }
+                    .clipped()
             }
-            .offset(x: shift)
         }
-        .clipped()
+        .frame(maxWidth: .infinity)
+        .frame(height: bannerHeight)
     }
 
     @ViewBuilder
-    private func serviceTile(kind: Int) -> some View {
-        switch kind {
-        case 0: // Tidal-style black diamond cluster
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.black)
-                .frame(width: 56, height: 56)
-                .overlay(
-                    VStack(spacing: 3) {
-                        HStack(spacing: 3) {
-                            diamond
-                            diamond
-                            diamond
-                        }
-                        diamond
-                    }
-                )
-        case 1: // YouTube Music-style red play circle badge
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(red: 0.96, green: 0.04, blue: 0.08))
-                .frame(width: 56, height: 56)
-                .overlay(
-                    ZStack {
-                        Circle()
-                            .strokeBorder(.white, lineWidth: 2)
-                            .frame(width: 30, height: 30)
-                        Image(systemName: "play.fill")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.white)
-                            .offset(x: 1)
-                    }
-                )
-        case 2: // Spotify-style green circle badge
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(white: 0.04))
-                .frame(width: 56, height: 56)
-                .overlay(
-                    ZStack {
-                        Circle()
-                            .fill(Color(red: 0.11, green: 0.73, blue: 0.33))
-                            .frame(width: 38, height: 38)
-                        Image(systemName: "dot.radiowaves.left.and.right")
-                            .font(.subheadline.weight(.black))
-                            .foregroundStyle(.black)
-                    }
-                )
-        default: // Apple Music-style coral note tile
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color(red: 0.99, green: 0.34, blue: 0.44), Color(red: 0.96, green: 0.18, blue: 0.32)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: 56, height: 56)
-                .overlay(
-                    Image(systemName: "music.note")
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(.white)
-                )
+    private func serviceTile(_ service: ImportBannerService) -> some View {
+        if let image = Self.cachedImages[service] {
+            image
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: tileSize, height: tileSize)
+                .accessibilityLabel(service.accessibilityLabel)
+        } else {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(white: 0.14))
+                .frame(width: tileSize, height: tileSize)
+                .accessibilityLabel(service.accessibilityLabel)
         }
-    }
-
-    private var diamond: some View {
-        Rectangle()
-            .fill(.white)
-            .frame(width: 7, height: 7)
-            .rotationEffect(.degrees(45))
     }
 }
 
@@ -789,7 +820,7 @@ public struct LibraryImportSheet: View {
                     Text("Import Public Playlist URL")
                         .font(.headline)
                         .foregroundStyle(.white)
-                    Text("Supports Spotify, Apple Music, Tidal, and YouTube Music playlists without login.")
+                    Text("Supports public Spotify, Apple Music, and YouTube Music playlist URLs without login. Import TIDAL via CSV below.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
