@@ -725,6 +725,7 @@ private actor DiskStreamSession {
             for url in candidateURLs {
                 var req = URLRequest(url: url)
                 req.httpMethod = "GET"
+                req.timeoutInterval = 4.0
                 req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
                 for (k, v) in descriptor.headers {
                     req.setValue(v, forHTTPHeaderField: k)

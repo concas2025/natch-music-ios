@@ -83,33 +83,87 @@ final class MochyInnerTubeTests: XCTestCase {
     }
 
     func testPlayerResponseFlexibleStringAndIntDecoding() throws {
-        let json = """
+        // Real live VISIONOS payload shape: `expiresInSeconds` arrives as JSON String ("21540"),
+        // plus mixed string/int numeric fields, missing optional videoDetails keys, and a malformed format entry.
+        let visionOSLiveJSON = """
         {
-          "playabilityStatus": { "status": "OK" },
+          "playabilityStatus": { "status": "OK", "playableInEmbed": true },
+          "playerConfig": {
+            "audioConfig": { "perceptualLoudnessDb": -9.78 }
+          },
+          "videoDetails": {
+            "videoId": "UH1Qb_tq7Wo",
+            "title": "Hơn Cả Anh",
+            "author": "VSTRA - Topic",
+            "viewCount": "57153"
+          },
           "streamingData": {
-            "expiresInSeconds": 21540,
+            "expiresInSeconds": "21540",
+            "hlsManifestUrl": "https://manifest.googlevideo.com/api/manifest/hls_variant/example",
+            "serverAbrStreamingUrl": "https://rr4---sn-42u-i5os7.googlevideo.com/videoplayback",
             "adaptiveFormats": [
               {
+                "itag": "corrupted-entry"
+              },
+              {
                 "itag": 140,
-                "url": "https://example.com/audio.mp4",
+                "url": "https://rr4---sn-42u-i5os7.googlevideo.com/audio.mp4",
                 "mimeType": "audio/mp4; codecs=\\"mp4a.40.2\\"",
-                "bitrate": 129800,
-                "contentLength": "3500000",
+                "bitrate": 131209,
+                "initRange": { "start": "0", "end": "767" },
+                "indexRange": { "start": "768", "end": "1051" },
+                "lastModified": "1795163399129633",
+                "contentLength": "3353751",
                 "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                "approxDurationMs": "207094",
                 "audioSampleRate": "44100",
-                "audioChannels": 2
+                "audioChannels": 2,
+                "loudnessDb": 4.22
               }
             ]
           }
         }
         """.data(using: .utf8)!
 
-        let decoded = try JSONDecoder().decode(PlayerResponse.self, from: json)
+        let decoded = try JSONDecoder().decode(PlayerResponse.self, from: visionOSLiveJSON)
+        XCTAssertEqual(decoded.streamingData?.expiresInSeconds, 21_540)
+        XCTAssertEqual(decoded.streamingData?.adaptiveFormats.count, 1)
         let fmt = try XCTUnwrap(decoded.streamingData?.adaptiveFormats.first)
-        XCTAssertEqual(fmt.contentLength, 3_500_000)
+        XCTAssertEqual(fmt.itag, 140)
+        XCTAssertEqual(fmt.contentLength, 3_353_751)
         XCTAssertEqual(fmt.audioSampleRate, 44_100)
+        XCTAssertEqual(fmt.lastModified, 1_795_163_399_129_633)
+        XCTAssertEqual(fmt.initRange?.end, "767")
         XCTAssertTrue(fmt.isAudio)
         XCTAssertTrue(fmt.isOriginal)
+        XCTAssertEqual(decoded.videoDetails?.channelId, "")
+        XCTAssertEqual(decoded.videoDetails?.lengthSeconds, "0")
+        XCTAssertEqual(decoded.playerConfig?.audioConfig?.perceptualLoudnessDb, -9.78)
+
+        // Progressive-only response with integer expiresInSeconds and missing adaptiveFormats
+        let progressiveOnlyJSON = """
+        {
+          "playabilityStatus": { "status": "OK" },
+          "streamingData": {
+            "expiresInSeconds": 21540,
+            "formats": [
+              {
+                "itag": 18,
+                "url": "https://example.com/prog18.mp4",
+                "mimeType": "video/mp4; codecs=\\"avc1.42001E, mp4a.40.2\\"",
+                "bitrate": 500000,
+                "width": 640,
+                "height": 360
+              }
+            ]
+          }
+        }
+        """.data(using: .utf8)!
+
+        let progDecoded = try JSONDecoder().decode(PlayerResponse.self, from: progressiveOnlyJSON)
+        XCTAssertEqual(progDecoded.streamingData?.expiresInSeconds, 21_540)
+        XCTAssertEqual(progDecoded.streamingData?.adaptiveFormats, [])
+        XCTAssertEqual(progDecoded.streamingData?.formats?.first?.itag, 18)
     }
 
     func testFormatRankingExcludesWebMOnIOSAndAppendsProgressiveItag18Fallback() {

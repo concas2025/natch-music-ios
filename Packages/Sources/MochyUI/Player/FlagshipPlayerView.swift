@@ -60,10 +60,19 @@ public struct FlagshipPlayerView: View {
 
                     if let err = coordinator.player.lastError, !err.isEmpty {
                         HStack(spacing: 8) {
-                            Text(err)
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(1)
+                            Button {
+                                onOpenStreamInfo()
+                            } label: {
+                                Text(err)
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .multilineTextAlignment(.leading)
+                                    .lineLimit(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+
                             Button("Retry") {
                                 coordinator.player.retryCurrentTrack()
                             }
@@ -75,9 +84,9 @@ public struct FlagshipPlayerView: View {
                             .clipShape(Capsule())
                         }
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 8)
                         .background(Color.white.opacity(0.12))
-                        .clipShape(Capsule())
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .padding(.horizontal, 24)
                     }
 

@@ -149,7 +149,29 @@ public actor InnerTubeClient {
         do {
             return try decoder.decode(PlayerResponse.self, from: data)
         } catch {
-            throw InnerTubeError.decodingFailed(error.localizedDescription)
+            throw InnerTubeError.decodingFailed(Self.describeDecodingError(error))
+        }
+    }
+
+    private static func describeDecodingError(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        func pathString(_ path: [CodingKey]) -> String {
+            path.isEmpty ? "<root>" : path.map(\.stringValue).joined(separator: ".")
+        }
+        switch decodingError {
+        case let .typeMismatch(type, ctx):
+            return "typeMismatch(\(type)) at \(pathString(ctx.codingPath))"
+        case let .valueNotFound(type, ctx):
+            return "valueNotFound(\(type)) at \(pathString(ctx.codingPath))"
+        case let .keyNotFound(key, ctx):
+            let full = ctx.codingPath + [key]
+            return "keyNotFound(\(key.stringValue)) at \(pathString(full))"
+        case let .dataCorrupted(ctx):
+            return "dataCorrupted at \(pathString(ctx.codingPath)): \(ctx.debugDescription)"
+        @unknown default:
+            return error.localizedDescription
         }
     }
 

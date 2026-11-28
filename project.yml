@@ -44,8 +44,8 @@ targets:
       properties:
         CFBundleDisplayName: Natch Music
         CFBundleName: Natch Music
-        CFBundleShortVersionString: "1.2.1"
-        CFBundleVersion: "4"
+        CFBundleShortVersionString: "1.2.3"
+        CFBundleVersion: "5"
         UILaunchScreen: {}
         UIUserInterfaceStyle: Dark
         UIBackgroundModes:

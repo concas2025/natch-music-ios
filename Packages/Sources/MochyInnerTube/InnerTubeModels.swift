@@ -142,6 +142,99 @@ public struct NextBody: Codable, Sendable, Equatable {
     public let continuation: String?
 }
 
+// MARK: - Flexible & Lossy JSON Decoding Helpers
+
+private enum FlexJSON {
+    static func decodeInt<K: CodingKey>(_ c: KeyedDecodingContainer<K>, forKey key: K) -> Int? {
+        if let val = try? c.decodeIfPresent(Int.self, forKey: key) {
+            return val
+        }
+        if let dbl = try? c.decodeIfPresent(Double.self, forKey: key) {
+            return Int(dbl)
+        }
+        if let str = try? c.decodeIfPresent(String.self, forKey: key) {
+            return Int(str.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    static func decodeInt64<K: CodingKey>(_ c: KeyedDecodingContainer<K>, forKey key: K) -> Int64? {
+        if let val = try? c.decodeIfPresent(Int64.self, forKey: key) {
+            return val
+        }
+        if let val = try? c.decodeIfPresent(Int.self, forKey: key) {
+            return Int64(val)
+        }
+        if let str = try? c.decodeIfPresent(String.self, forKey: key) {
+            return Int64(str.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    static func decodeDouble<K: CodingKey>(_ c: KeyedDecodingContainer<K>, forKey key: K) -> Double? {
+        if let val = try? c.decodeIfPresent(Double.self, forKey: key) {
+            return val
+        }
+        if let val = try? c.decodeIfPresent(Int.self, forKey: key) {
+            return Double(val)
+        }
+        if let str = try? c.decodeIfPresent(String.self, forKey: key) {
+            return Double(str.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    static func decodeString<K: CodingKey>(_ c: KeyedDecodingContainer<K>, forKey key: K) -> String? {
+        if let val = try? c.decodeIfPresent(String.self, forKey: key) {
+            return val
+        }
+        if let val = try? c.decodeIfPresent(Int64.self, forKey: key) {
+            return String(val)
+        }
+        if let val = try? c.decodeIfPresent(Double.self, forKey: key) {
+            return String(val)
+        }
+        return nil
+    }
+
+    static func decodeLossyArray<K: CodingKey, Element: Decodable>(
+        _ c: KeyedDecodingContainer<K>,
+        forKey key: K
+    ) -> [Element]? {
+        guard c.contains(key) else { return nil }
+        return (try? c.decodeIfPresent(LossyDecodableArray<Element>.self, forKey: key))?.elements
+    }
+}
+
+private struct LossyDecodableArray<Element: Decodable>: Decodable {
+    let elements: [Element]
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var decoded: [Element] = []
+        while !container.isAtEnd {
+            if (try? container.decodeNil()) == true {
+                continue
+            }
+            if let item = try? container.decode(Element.self) {
+                decoded.append(item)
+            } else {
+                _ = try? container.decode(SkipJSONValue.self)
+            }
+        }
+        self.elements = decoded
+    }
+}
+
+private enum SkipJSONValue: Decodable {
+    case ignored
+
+    init(from decoder: Decoder) throws {
+        _ = try? decoder.singleValueContainer()
+        self = .ignored
+    }
+}
+
 // MARK: - Responses
 
 public struct ResponseContext: Codable, Sendable, Equatable {
@@ -156,22 +249,82 @@ public struct ThumbnailItem: Codable, Sendable, Equatable {
     public let url: String
     public let width: Int?
     public let height: Int?
+
+    public init(url: String, width: Int? = nil, height: Int? = nil) {
+        self.url = url
+        self.width = width
+        self.height = height
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case url, width, height
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        url = (try? c.decodeIfPresent(String.self, forKey: .url)) ?? ""
+        width = FlexJSON.decodeInt(c, forKey: .width)
+        height = FlexJSON.decodeInt(c, forKey: .height)
+    }
 }
 
 public struct Thumbnails: Codable, Sendable, Equatable {
     public let thumbnails: [ThumbnailItem]
+
+    public init(thumbnails: [ThumbnailItem] = []) {
+        self.thumbnails = thumbnails
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case thumbnails
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        thumbnails = FlexJSON.decodeLossyArray(c, forKey: .thumbnails) ?? []
+    }
 }
 
 public struct PlayerResponse: Codable, Sendable, Equatable {
     public struct PlayabilityStatus: Codable, Sendable, Equatable {
         public let status: String
         public let reason: String?
+
+        public init(status: String, reason: String? = nil) {
+            self.status = status
+            self.reason = reason
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case status, reason
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            status = (try? c.decodeIfPresent(String.self, forKey: .status)) ?? "UNKNOWN"
+            reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+        }
     }
 
     public struct PlayerConfig: Codable, Sendable, Equatable {
         public struct AudioConfig: Codable, Sendable, Equatable {
             public let loudnessDb: Double?
             public let perceptualLoudnessDb: Double?
+
+            public init(loudnessDb: Double? = nil, perceptualLoudnessDb: Double? = nil) {
+                self.loudnessDb = loudnessDb
+                self.perceptualLoudnessDb = perceptualLoudnessDb
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case loudnessDb, perceptualLoudnessDb
+            }
+
+            public init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                loudnessDb = FlexJSON.decodeDouble(c, forKey: .loudnessDb)
+                perceptualLoudnessDb = FlexJSON.decodeDouble(c, forKey: .perceptualLoudnessDb)
+            }
         }
 
         public let audioConfig: AudioConfig?
@@ -182,6 +335,21 @@ public struct PlayerResponse: Codable, Sendable, Equatable {
             public struct ByteRange: Codable, Sendable, Equatable {
                 public let start: String
                 public let end: String
+
+                public init(start: String, end: String) {
+                    self.start = start
+                    self.end = end
+                }
+
+                private enum CodingKeys: String, CodingKey {
+                    case start, end
+                }
+
+                public init(from decoder: Decoder) throws {
+                    let c = try decoder.container(keyedBy: CodingKeys.self)
+                    start = FlexJSON.decodeString(c, forKey: .start) ?? "0"
+                    end = FlexJSON.decodeString(c, forKey: .end) ?? "0"
+                }
             }
 
             public struct AudioTrack: Codable, Sendable, Equatable {
@@ -273,60 +441,63 @@ public struct PlayerResponse: Codable, Sendable, Equatable {
 
             public init(from decoder: Decoder) throws {
                 let c = try decoder.container(keyedBy: CodingKeys.self)
-                itag = try c.decode(Int.self, forKey: .itag)
-                url = try c.decodeIfPresent(String.self, forKey: .url)
-                mimeType = try c.decode(String.self, forKey: .mimeType)
-                bitrate = try c.decode(Int.self, forKey: .bitrate)
-                width = try c.decodeIfPresent(Int.self, forKey: .width)
-                height = try c.decodeIfPresent(Int.self, forKey: .height)
-                contentLength = Self.decodeFlexibleInt64(c, key: .contentLength)
-                quality = try c.decodeIfPresent(String.self, forKey: .quality)
-                fps = try c.decodeIfPresent(Int.self, forKey: .fps)
-                qualityLabel = try c.decodeIfPresent(String.self, forKey: .qualityLabel)
-                averageBitrate = try c.decodeIfPresent(Int.self, forKey: .averageBitrate)
-                audioQuality = try c.decodeIfPresent(String.self, forKey: .audioQuality)
-                approxDurationMs = try c.decodeIfPresent(String.self, forKey: .approxDurationMs)
-                audioSampleRate = Self.decodeFlexibleInt(c, key: .audioSampleRate)
-                audioChannels = try c.decodeIfPresent(Int.self, forKey: .audioChannels)
-                loudnessDb = try c.decodeIfPresent(Double.self, forKey: .loudnessDb)
-                lastModified = Self.decodeFlexibleInt64(c, key: .lastModified)
-                signatureCipher = try c.decodeIfPresent(String.self, forKey: .signatureCipher)
-                cipher = try c.decodeIfPresent(String.self, forKey: .cipher)
-                audioTrack = try c.decodeIfPresent(AudioTrack.self, forKey: .audioTrack)
-                initRange = try c.decodeIfPresent(ByteRange.self, forKey: .initRange)
-                indexRange = try c.decodeIfPresent(ByteRange.self, forKey: .indexRange)
-            }
-
-            private static func decodeFlexibleInt64(
-                _ container: KeyedDecodingContainer<CodingKeys>,
-                key: CodingKeys
-            ) -> Int64? {
-                if let val = try? container.decodeIfPresent(Int64.self, forKey: key) {
-                    return val
+                guard let decodedItag = FlexJSON.decodeInt(c, forKey: .itag) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .itag,
+                        in: c,
+                        debugDescription: "Missing or invalid itag"
+                    )
                 }
-                if let str = try? container.decodeIfPresent(String.self, forKey: key) {
-                    return Int64(str)
-                }
-                return nil
-            }
-
-            private static func decodeFlexibleInt(
-                _ container: KeyedDecodingContainer<CodingKeys>,
-                key: CodingKeys
-            ) -> Int? {
-                if let val = try? container.decodeIfPresent(Int.self, forKey: key) {
-                    return val
-                }
-                if let str = try? container.decodeIfPresent(String.self, forKey: key) {
-                    return Int(str)
-                }
-                return nil
+                itag = decodedItag
+                url = try? c.decodeIfPresent(String.self, forKey: .url)
+                mimeType = (try? c.decodeIfPresent(String.self, forKey: .mimeType)) ?? ""
+                bitrate = FlexJSON.decodeInt(c, forKey: .bitrate) ?? 0
+                width = FlexJSON.decodeInt(c, forKey: .width)
+                height = FlexJSON.decodeInt(c, forKey: .height)
+                contentLength = FlexJSON.decodeInt64(c, forKey: .contentLength)
+                quality = try? c.decodeIfPresent(String.self, forKey: .quality)
+                fps = FlexJSON.decodeInt(c, forKey: .fps)
+                qualityLabel = try? c.decodeIfPresent(String.self, forKey: .qualityLabel)
+                averageBitrate = FlexJSON.decodeInt(c, forKey: .averageBitrate)
+                audioQuality = try? c.decodeIfPresent(String.self, forKey: .audioQuality)
+                approxDurationMs = FlexJSON.decodeString(c, forKey: .approxDurationMs)
+                audioSampleRate = FlexJSON.decodeInt(c, forKey: .audioSampleRate)
+                audioChannels = FlexJSON.decodeInt(c, forKey: .audioChannels)
+                loudnessDb = FlexJSON.decodeDouble(c, forKey: .loudnessDb)
+                lastModified = FlexJSON.decodeInt64(c, forKey: .lastModified)
+                signatureCipher = try? c.decodeIfPresent(String.self, forKey: .signatureCipher)
+                cipher = try? c.decodeIfPresent(String.self, forKey: .cipher)
+                audioTrack = try? c.decodeIfPresent(AudioTrack.self, forKey: .audioTrack)
+                initRange = try? c.decodeIfPresent(ByteRange.self, forKey: .initRange)
+                indexRange = try? c.decodeIfPresent(ByteRange.self, forKey: .indexRange)
             }
         }
 
         public let formats: [Format]?
         public let adaptiveFormats: [Format]
         public let expiresInSeconds: Int
+
+        public init(
+            formats: [Format]? = nil,
+            adaptiveFormats: [Format] = [],
+            expiresInSeconds: Int = 21_540
+        ) {
+            self.formats = formats
+            self.adaptiveFormats = adaptiveFormats
+            self.expiresInSeconds = expiresInSeconds
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case formats, adaptiveFormats, expiresInSeconds
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            formats = FlexJSON.decodeLossyArray(c, forKey: .formats)
+            adaptiveFormats = FlexJSON.decodeLossyArray(c, forKey: .adaptiveFormats) ?? []
+            // YouTube routinely sends `expiresInSeconds` as a JSON string ("21540") or integer.
+            expiresInSeconds = FlexJSON.decodeInt(c, forKey: .expiresInSeconds) ?? 21_540
+        }
     }
 
     public struct VideoDetails: Codable, Sendable, Equatable {
@@ -338,6 +509,42 @@ public struct PlayerResponse: Codable, Sendable, Equatable {
         public let musicVideoType: String?
         public let viewCount: String?
         public let thumbnail: Thumbnails?
+
+        public init(
+            videoId: String,
+            title: String? = nil,
+            author: String? = nil,
+            channelId: String = "",
+            lengthSeconds: String = "0",
+            musicVideoType: String? = nil,
+            viewCount: String? = nil,
+            thumbnail: Thumbnails? = nil
+        ) {
+            self.videoId = videoId
+            self.title = title
+            self.author = author
+            self.channelId = channelId
+            self.lengthSeconds = lengthSeconds
+            self.musicVideoType = musicVideoType
+            self.viewCount = viewCount
+            self.thumbnail = thumbnail
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case videoId, title, author, channelId, lengthSeconds, musicVideoType, viewCount, thumbnail
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            videoId = (try? c.decodeIfPresent(String.self, forKey: .videoId)) ?? ""
+            title = try? c.decodeIfPresent(String.self, forKey: .title)
+            author = try? c.decodeIfPresent(String.self, forKey: .author)
+            channelId = (try? c.decodeIfPresent(String.self, forKey: .channelId)) ?? ""
+            lengthSeconds = FlexJSON.decodeString(c, forKey: .lengthSeconds) ?? "0"
+            musicVideoType = try? c.decodeIfPresent(String.self, forKey: .musicVideoType)
+            viewCount = FlexJSON.decodeString(c, forKey: .viewCount)
+            thumbnail = try? c.decodeIfPresent(Thumbnails.self, forKey: .thumbnail)
+        }
     }
 
     public struct Captions: Codable, Sendable, Equatable {
@@ -351,6 +558,23 @@ public struct PlayerResponse: Codable, Sendable, Equatable {
             public let kind: String?
 
             public var isAutoGenerated: Bool { kind == "asr" }
+
+            public init(baseUrl: String, languageCode: String? = nil, kind: String? = nil) {
+                self.baseUrl = baseUrl
+                self.languageCode = languageCode
+                self.kind = kind
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case baseUrl, languageCode, kind
+            }
+
+            public init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                baseUrl = (try? c.decodeIfPresent(String.self, forKey: .baseUrl)) ?? ""
+                languageCode = try? c.decodeIfPresent(String.self, forKey: .languageCode)
+                kind = try? c.decodeIfPresent(String.self, forKey: .kind)
+            }
         }
 
         public let playerCaptionsTracklistRenderer: PlayerCaptionsTracklistRenderer?
